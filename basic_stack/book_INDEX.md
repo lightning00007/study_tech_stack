@@ -1,6 +1,6 @@
 # 📖 Complete Technical Learning Book — Master Index
 
-> **10 Chapters · Deep Dive · Production-Quality Code**
+> **11 Chapters · Deep Dive · Production-Quality Code**
 > Designed to prepare you for real enterprise work.
 
 ---
@@ -19,6 +19,7 @@
 | 8 | **AWS Lambda** — Execution Model, Cold Starts, All Triggers, Concurrency, Best Practices | [book_ch6_ch7_ch8_aws_cloudwatch_media_lambda.md](book_ch6_ch7_ch8_aws_cloudwatch_media_lambda.md) |
 | 9 | **CQRS + MediatR** — Commands, Queries, Pipeline Behaviors, Notifications, Idempotency | [book_ch9_ch10_dotnet_patterns.md](book_ch9_ch10_dotnet_patterns.md) |
 | 10 | **Unit of Work + Repository** — Generic Repo, Specifications, UoW, Audit Fields, Testing | [book_ch9_ch10_dotnet_patterns.md](book_ch9_ch10_dotnet_patterns.md) |
+| 11 | **EF Core + MediatR + PostgreSQL** — Change Tracker, Npgsql Features, Migrations, Pipeline Behaviors, Domain Events, Projections, Performance | [book_ch11_efcore_mediatr_postgresql.md](book_ch11_efcore_mediatr_postgresql.md) |
 
 ---
 
@@ -74,11 +75,28 @@ What is a Repository?
   A collection-like abstraction over the DB. Enables mocking. Hides ORM details.
 
 What is Unit of Work?
-  Coordinates multiple repositories. One SaveChangesAsync() = one DB transaction.
+  Coordinates multiple repositories. One SaveChanges() = one DB transaction.
 
 Why separate them?
   Testability: mock IUnitOfWork in unit tests → no DB needed.
   Replaceability: switch from EF Core to Dapper by replacing implementations, not handlers.
+```
+
+### EF Core + MediatR + PostgreSQL: Key Decisions
+
+```
+Query handler reads data?          → Always AsNoTracking()
+Command handler modifies data?     → Load with tracking, call SaveChangesAsync()
+Need soft deletes everywhere?      → Global Query Filter on IsDeleted
+Need audit fields (CreatedAt etc)? → Override SaveChangesAsync() in DbContext
+Need atomic multi-step commands?   → TransactionBehavior in MediatR pipeline
+Two users editing same record?     → Concurrency token (xmin in PostgreSQL)
+Store flexible semi-structured?    → JSONB column via Npgsql provider
+Need enum readability in DB?       → Native PostgreSQL enum via Npgsql
+Side effects after a save?         → Domain Events dispatched post-SaveChangesAsync()
+Loading 1000+ rows for display?    → Project to DTO with Select(), never load full entities
+Bulk INSERT/UPDATE/DELETE?         → ExecuteUpdateAsync / ExecuteDeleteAsync (EF Core 7+)
+Adding index to large table live?  → CREATE INDEX CONCURRENTLY (not EF Core default)
 ```
 
 ---
@@ -112,6 +130,13 @@ Why separate them?
 - [ ] **Day 3**: Create 3 Queries + Handlers. Add Redis caching to one query.
 - [ ] **Day 4**: Add LoggingBehavior, ValidationBehavior, PerformanceBehavior as pipeline behaviors.
 - [ ] **Day 5**: Implement Unit of Work + Repository. Write unit tests with Moq.
+
+### Week 4 Part 2: EF Core Deep Dive
+- [ ] **Day 1**: Add AsNoTracking() to every Query handler. Enable SQL logging. Observe the difference.
+- [ ] **Day 2**: Add a Global Query Filter for soft deletes. Override SaveChangesAsync() for audit fields.
+- [ ] **Day 3**: Add xmin concurrency token to one entity. Write a test that demonstrates the conflict.
+- [ ] **Day 4**: Implement domain events on an entity. Dispatch them post-commit via MediatR.Publish().
+- [ ] **Day 5**: Write a Testcontainers integration test that spins up PostgreSQL and runs migrations.
 
 ### Week 4: Integration
 - [ ] Build a mini order system using ALL the patterns together:
@@ -195,3 +220,18 @@ Why separate them?
 | Unit of Work | Coordinates repos. One SaveChanges = one transaction. |
 | Audit Fields | Set CreatedAt/UpdatedAt automatically in SaveChanges override. |
 | Testing | Mock IUnitOfWork → no DB needed for unit tests. |
+
+### EF Core + MediatR + PostgreSQL
+| Concept | Remember |
+|---|---|
+| DbContext lifetime | Scoped. One per HTTP request. Never singleton. |
+| Change Tracker | Tracks every loaded entity. SaveChangesAsync() is the commit point. |
+| AsNoTracking() | Always in Queries. Never in Commands that need to save changes. |
+| Global Query Filters | Soft-delete WHERE clause, applied automatically to all queries. |
+| xmin column | PostgreSQL built-in concurrency token. Changes on every row update. |
+| JSONB via Npgsql | Map C# class to JSONB. Filter inside JSON with LINQ — no raw SQL. |
+| Native PG Enums | Store enum as readable string (Pending, Shipped) not integer. |
+| Domain Events | Stored on entity, dispatched after SaveChangesAsync() commits. |
+| N+1 Problem | Enable SQL logging. One query per loop iteration = N+1. Fix with Include or projection. |
+| Compiled Queries | Cache LINQ-to-SQL translation. Use on hot-path queries. |
+| Migration safety | Nullable first, then NOT NULL. CONCURRENTLY for large table indexes. |
