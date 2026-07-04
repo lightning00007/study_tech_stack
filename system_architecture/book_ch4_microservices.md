@@ -1,443 +1,785 @@
-# Chapter 4: Microservices Architecture
+# Chapter 4: Microservices & MediatR
 
-> **System Design · Service Decomposition · Team Organization**
-> *"Microservices are not about technology. They are about organizational structure. Conway's Law says: Any organization that designs a system will produce a design whose structure is a copy of the organization's communication structure."*
-> — Melvin Conway, 1967 (still painfully true today)
+> **System Design · MediatR CQRS · AWS Service Architecture**
+> *"MediatR is not just a library — it is a discipline. It forces you to think of every operation as a named, explicit thing with a clear purpose."*
+> *"Conway's Law: Any organization that designs a system will produce a design whose structure copies the organization's communication structure."*
+> — Melvin Conway, 1967
 
 ---
 
 ## Table of Contents
 
-1. [Introduction — The Monolith That Grew Too Large](#1-introduction)
+1. [Introduction — From Monolith to Service-Oriented Grapeseed](#1-introduction)
 2. [Monolith vs. Microservices — An Honest Comparison](#2-monolith-vs-microservices)
-3. [Domain-Driven Design — Finding the Boundaries](#3-domain-driven-design)
-4. [Designing the LinguaLearn Services](#4-designing-lingualearn-services)
-5. [Service Communication — Sync vs. Async](#5-service-communication)
-6. [Building a Minimal API Service in C#](#6-building-a-minimal-api-service)
-7. [The API Gateway — The Front Door](#7-api-gateway)
-8. [The Event Bus — Async Communication with MassTransit](#8-event-bus)
-9. [The Saga Pattern — Distributed Transactions](#9-saga-pattern)
-10. [Resilience with Polly — Calling Other Services Safely](#10-resilience-with-polly)
-11. [Distributed Tracing and Observability](#11-distributed-tracing)
-12. [Service Mesh — Managing Service-to-Service Traffic](#12-service-mesh)
-13. [The Education Platform Scenario — Student Enrollment](#13-education-platform-scenario)
-14. [The Microservices Trap — When NOT to Use Them](#14-microservices-trap)
-15. [Decision Guide and Migration Path](#15-decision-guide)
+3. [MediatR — The Architecture Inside Each Service](#3-mediatr-inside-each-service)
+4. [MediatR Commands, Queries, and Notifications](#4-mediatr-cqrs)
+5. [MediatR Pipeline Behaviors — The Full Stack](#5-pipeline-behaviors)
+6. [Domain-Driven Design — Finding Service Boundaries](#6-domain-driven-design)
+7. [Designing Grapeseed's Services](#7-grapeseed-services)
+8. [Service Communication — Sync vs. Async](#8-service-communication)
+9. [AWS API Gateway — The Front Door](#9-aws-api-gateway)
+10. [Amazon SQS/SNS — Async Event Bus Between Services](#10-sqs-sns-event-bus)
+11. [The Saga Pattern — Distributed Transactions](#11-saga-pattern)
+12. [Resilience with Polly Between Services](#12-resilience-with-polly)
+13. [Distributed Tracing with AWS X-Ray](#13-distributed-tracing)
+14. [The Grapeseed Scenario — Student Enrollment](#14-grapeseed-scenario)
+15. [When NOT to Use Microservices](#15-when-not-to-use)
 16. [Summary and Key Takeaways](#16-summary)
 
 ---
 
-## 1. Introduction — The Monolith That Grew Too Large
+## 1. Introduction — From Monolith to Service-Oriented Grapeseed
 
-LinguaLearn launched three years ago as a single application. One codebase, one database, one deployment. At the time, this was exactly right — the team was small, the feature set was simple, and moving fast mattered more than architectural purity.
+Grapeseed started as a single C# application: one ASP.NET Core project, one RDS PostgreSQL database, deployed on a single ECS task. At the time, this was the right choice. The team was small, features were being discovered, and moving fast mattered more than perfect architecture.
 
-But things change. The engineering team grew from 5 to 60 developers. Features multiplied: live video classes, AI pronunciation feedback, parent portals, school management dashboards, analytics reports. The codebase grew to 500,000 lines of code. And now, every deployment of the slightest change requires deploying the entire application, touching every team's work simultaneously.
+Three years and many schools later, the codebase has grown. The lesson team, the video team, the reporting team, and the school administration team all push code to the same repository. Here's what a typical deployment week looks like:
 
-Here is what a typical week looks like in the monolith:
+- **Team A (Lesson Content)** finishes a new unit pacing feature — ready to release Tuesday.
+- **Team B (Video Streaming)** is fixing a critical bug in video transcoding — not ready.
+- **Team C (Analytics)** pushed a breaking change to a shared model. Team A and Team B just found out.
+- **Nobody can release until all three issues are resolved.**
 
-- Team A (video features) is ready to deploy their new feature on Tuesday.
-- Team B (quiz engine) has a bug in their code that was discovered Monday.
-- Team C (reporting) pushed a change that breaks the authentication module.
-- **Nobody can deploy until everything is fixed.** Three teams are blocked by one team's bug.
+Meanwhile, the video streaming code needs 8 ECS task instances during peak viewing hours. The analytics code runs heavy reports once a week. Yet both are in the same ECS service — you scale both when you only need to scale one, wasting money.
 
-Meanwhile, the video feature needs 10 servers during video-heavy hours (2-4 PM), but the reporting feature only runs once a week on Sunday. Yet the whole application scales together — you can't scale just the video part.
-
-A developer working on the quiz engine module needs to understand how the authentication module works, because they share the same database and the same codebase. Knowledge silos break down. The codebase becomes nobody's home territory and everybody's problem.
-
-**This is what microservices solve.** Not just a technical problem — a people and organization problem.
+**Microservices solve this.** But before diving in, we need to cover the architectural pattern that keeps each microservice's code clean and organized: **MediatR**.
 
 ---
 
 ## 2. Monolith vs. Microservices — An Honest Comparison
 
-Before you rush to break up your application, you need an honest understanding of what you're gaining and what you're giving up.
-
 ### The Monolith
 
-A monolith is a single deployable unit. All features, all business logic, all data access are in one application, sharing one database.
-
 ```
-┌───────────────────────────────────────────────────────┐
-│                    LinguaLearn Monolith                │
-│                                                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐ │
-│  │ UserModule   │  │ LessonModule │  │ VideoModule │ │
-│  └──────────────┘  └──────────────┘  └─────────────┘ │
-│  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐ │
-│  │ProgressModule│  │ NotifyModule │  │ AdminModule │ │
-│  └──────────────┘  └──────────────┘  └─────────────┘ │
-│                                                        │
-│  ┌────────────────────────────────────────────────┐   │
-│  │           Single Shared Database               │   │
-│  └────────────────────────────────────────────────┘   │
-└───────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│             Grapeseed Monolith (ECS Task)           │
+│                                                      │
+│  ┌────────────┐  ┌────────────┐  ┌───────────────┐ │
+│  │  Identity  │  │  Lessons   │  │    Videos     │ │
+│  │  Module    │  │  Module    │  │    Module     │ │
+│  └────────────┘  └────────────┘  └───────────────┘ │
+│  ┌────────────┐  ┌────────────┐  ┌───────────────┐ │
+│  │  Progress  │  │ Analytics  │  │ Notifications │ │
+│  │  Module    │  │  Module    │  │    Module     │ │
+│  └────────────┘  └────────────┘  └───────────────┘ │
+│                                                      │
+│         One Shared RDS PostgreSQL Database           │
+└─────────────────────────────────────────────────────┘
 ```
 
 **✅ Monolith Advantages:**
-- Simple to develop: one codebase, one IDE, one debugger
-- Simple to deploy: one build, one container
-- Transactions are easy: ACID transactions across all data
-- No network calls between modules: function calls are instant
-- Easy to debug: all logs in one place, one stack trace
-- Faster to iterate early: less infrastructure overhead
+- One codebase — easy to debug, one log stream in CloudWatch
+- No network calls between modules — function calls, no latency
+- Database transactions work across all modules — ACID guarantees
+- Simple deployment — one ECS service to update
+- Fast for early-stage development — less infrastructure overhead
 
-**❌ Monolith Problems (at scale):**
-- **Deployment coupling:** All teams must deploy together
-- **Scaling coupling:** Can't scale one feature without scaling all
-- **Technology lock-in:** Entire app must use the same language and framework
-- **Codebase size:** 500K+ line codebases are hard to understand
-- **Team ownership:** Nobody truly owns anything; everyone touches everything
-- **Blast radius:** A bug in one module can crash the entire application
+**❌ Monolith Problems at Grapeseed's Scale:**
+- Deployment coupling — Team A can't release until Team C fixes their bug
+- Scaling coupling — can't scale video streaming without scaling analytics
+- Blast radius — a bug in analytics crashes the lesson delivery module
+- Codebase complexity — 500K+ lines that everyone must understand
 
 ### Microservices
 
-Each feature area becomes an independent service with its own codebase, database, and deployment pipeline.
-
 ```
-                    [API Gateway]
-                    /     |      \
-   [UserService] [LessonService] [VideoService]
-         |              |               |
-   [Users DB]    [Lessons DB]    [Videos DB]
-   
-   [ProgressService]  [NotifyService]
-         |                  |
-   [Progress DB]      [Email/SMS Queue]
+                   [AWS API Gateway]
+                  /        |         \
+[IdentityService] [LessonService] [VideoService]
+       |                |                |
+[RDS PostgreSQL] [RDS PostgreSQL] [S3 + CloudFront]
+       
+[ProgressService]  [NotificationService]  [AnalyticsService]
+       |                  |                      |
+[RDS PostgreSQL]    [SQS + SES/SNS]      [RDS SQL Server]
 ```
 
 **✅ Microservices Advantages:**
-- **Independent deployment:** The Video team deploys on Tuesday; the Quiz team deploys on Thursday. No coordination needed.
-- **Independent scaling:** Scale the Video Service to 20 instances on exam day. Keep the Admin Service at 2 instances.
-- **Technology flexibility:** UserService in C#, VideoService in Go (better for streaming), AnalyticsService in Python (better for data science).
-- **Team ownership:** Each team owns their service end-to-end — code, database, deployment, monitoring.
-- **Fault isolation:** The Notification Service going down doesn't crash the Lesson Service.
-- **Smaller codebases:** Each service is small enough for any team member to fully understand.
+- **Independent deployment** — Video team deploys Thursday, Lesson team deploys Friday. No coordination.
+- **Independent scaling** — LessonService scales to 30 tasks on exam day. AnalyticsService stays at 2.
+- **Technology flexibility** — AnalyticsService uses SQL Server because the analytics team knows T-SQL.
+- **Team ownership** — Each team owns their service, their database, their deployment pipeline.
+- **Fault isolation** — AnalyticsService down doesn't affect lesson delivery.
 
 **❌ Microservices Costs:**
-- **Distributed system complexity:** Every call between services is a network call (see Chapter 1).
-- **Operational overhead:** 10 services = 10 deployment pipelines, 10 databases, 10 log streams.
-- **Distributed transactions:** ACID transactions don't work across services. You need Sagas (Section 9).
-- **Data consistency:** Enforcing referential integrity across service databases is complex.
-- **Testing complexity:** Integration tests must spin up multiple services.
-- **Latency:** A service-to-service call adds network latency on top of business logic time.
+- Distributed system complexity (network calls between services can fail)
+- No cross-service ACID transactions (need Saga pattern)
+- Multiple CloudWatch log groups to correlate
+- More AWS resources to manage (multiple ECS services, RDS instances, IAM roles)
+- Integration testing complexity
 
-> **The Rule:** Start with a monolith. Break it into microservices only when you have a concrete problem that microservices solve — most commonly: deployment coupling, scaling coupling, or team ownership issues. Microservices are a solution to an organizational scale problem. They are not inherently better architecture.
-
----
-
-## 3. Domain-Driven Design — Finding the Boundaries
-
-The hardest part of microservices is not building them — it's figuring out where to draw the boundaries. Cut the boundaries wrong and you end up with services that are constantly calling each other, creating a **distributed monolith** that has all the costs of microservices with none of the benefits.
-
-**Domain-Driven Design (DDD)** gives us a principled approach to finding those boundaries through the concept of **Bounded Contexts**.
-
-### What Is a Bounded Context?
-
-A Bounded Context is a boundary within which a particular domain model applies. Inside the boundary, terms have specific, consistent meanings. Outside the boundary, the same word might mean something completely different.
-
-Here's a surprising example from LinguaLearn:
-
-The word **"User"** means something different in each context:
-
-| Service Context | "User" means... |
-|----------------|-----------------|
-| Identity/Auth | A set of credentials (email, password hash, roles) |
-| Lesson Context | A student with a learning level, enrolled lessons, and progress |
-| Video Context | A viewer with streaming preferences and watch history |
-| Billing Context | A subscriber with a payment method and subscription tier |
-| Notification Context | A recipient with contact preferences (email/SMS/push) |
-
-If you have one giant `User` class that tries to model all of these simultaneously, it becomes a massive, incoherent blob with 50 properties, most of which are irrelevant in any given context.
-
-A **Bounded Context** separates these. The Identity service has its own lean `User` model. The Lesson service has its own `Student` model (which refers to the same person but only cares about lesson-relevant data). They are **the same person in the real world but modeled differently in each context.**
-
-### Identifying Bounded Contexts
-
-To find your bounded contexts, look for:
-1. **Differences in language** — When two teams use the same word to mean different things
-2. **Different rates of change** — Billing data changes for business reasons; video streaming logic changes for technical reasons
-3. **Different teams** — If a different team owns it, it's likely a different bounded context
-4. **Cohesion within, minimal coupling between** — Everything inside the boundary is closely related; things outside are referenced only by ID
+> **The Rule:** Start with a modular monolith. Extract microservices only when you have concrete problems (deployment coupling, scaling coupling, team ownership) that microservices solve.
 
 ---
 
-## 4. Designing the LinguaLearn Services
+## 3. MediatR — The Architecture Inside Each Service
 
-Applying DDD, here are the bounded contexts (and therefore microservices) for LinguaLearn:
+**MediatR** is an in-process mediator library for .NET. It implements the **Mediator pattern**: instead of objects calling each other directly, they send messages through a central mediator, which routes them to the appropriate handler.
+
+In Grapeseed, MediatR is used **within each microservice** to implement CQRS (Command Query Responsibility Segregation) — separating read operations (Queries) from write operations (Commands).
+
+### Why MediatR Changes Everything
+
+Without MediatR, a typical controller looks like this — everything direct-coupled:
+
+```csharp
+// ❌ WITHOUT MediatR: Controller knows about every service it needs
+[ApiController]
+public class ProgressController : ControllerBase
+{
+    private readonly IProgressRepository _progressRepo;
+    private readonly IStudentRepository _studentRepo;
+    private readonly ILessonRepository _lessonRepo;
+    private readonly ICertificateService _certificateService;
+    private readonly IEmailService _emailService;
+    private readonly IElastiCacheService _cache;
+    private readonly ITenantContext _tenant;
+    private readonly ILogger<ProgressController> _logger;
+
+    // Constructor injection of 8 dependencies — and this grows as features are added
+    public ProgressController(/* 8 services injected */) { /* ... */ }
+
+    [HttpPost]
+    public async Task<IActionResult> SubmitProgress(SubmitProgressRequest request)
+    {
+        // All business logic lives in the controller
+        // Hard to test, hard to maintain, hard to extend
+        _logger.LogInformation("Submitting progress for school {SchoolId}", _tenant.SchoolId);
+        // ... 50 lines of mixed business and plumbing logic ...
+    }
+}
+```
+
+With MediatR, the controller becomes a thin dispatcher:
+
+```csharp
+// ✅ WITH MediatR: Controller is clean — one dependency, clear intent
+[ApiController]
+public class ProgressController : ControllerBase
+{
+    private readonly IMediator _mediator;  // Only one dependency!
+
+    public ProgressController(IMediator mediator) => _mediator = mediator;
+
+    [HttpPost]
+    public async Task<IActionResult> SubmitProgress(SubmitProgressRequest request)
+    {
+        var result = await _mediator.Send(new SubmitLessonProgressCommand(
+            Unit: request.Unit,
+            LessonNumber: request.LessonNumber,
+            ScorePercent: request.ScorePercent));
+
+        return Ok(result);
+    }
+
+    [HttpGet("{studentId:int}")]
+    public async Task<IActionResult> GetProgress(int studentId)
+    {
+        var result = await _mediator.Send(new GetStudentProgressQuery(studentId));
+        return Ok(result);
+    }
+}
+```
+
+The controller no longer knows *how* progress is saved, or what happens after a quiz is submitted (emails, certificates, analytics). It simply sends a named, strongly-typed message and trusts the system to handle it.
+
+---
+
+## 4. MediatR Commands, Queries, and Notifications
+
+MediatR distinguishes between three types of messages, each serving a different purpose:
+
+### Commands — "Do Something, Tell Me the Result"
+
+Commands represent **write operations** — they change state. They have exactly one handler.
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Commands/SubmitLessonProgressCommand.cs
+// "Record that a student completed a Grapeseed lesson"
+// ─────────────────────────────────────────────────────────────────
+public record SubmitLessonProgressCommand(
+    string Unit,
+    int LessonNumber,
+    int ScorePercent
+) : IRequest<SubmitProgressResponse>, ITenantRequest
+{
+    public string SchoolId { get; set; } = string.Empty; // Set by TenantValidationBehavior
+}
+
+public record SubmitProgressResponse(
+    bool IsCompleted,
+    int ScorePercent,
+    string Message,
+    string? CertificateUrl  // null if not earned yet
+);
+
+// The handler — focused on business logic only
+public class SubmitLessonProgressCommandHandler
+    : IRequestHandler<SubmitLessonProgressCommand, SubmitProgressResponse>
+{
+    private readonly GrapeseekWriteDbContext _db;
+    private readonly IGrapeseekEventBus _eventBus;
+    private readonly ILogger<SubmitLessonProgressCommandHandler> _logger;
+
+    public SubmitLessonProgressCommandHandler(
+        GrapeseekWriteDbContext db,
+        IGrapeseekEventBus eventBus,
+        ILogger<SubmitLessonProgressCommandHandler> logger)
+    {
+        _db = db;
+        _eventBus = eventBus;
+        _logger = logger;
+    }
+
+    public async Task<SubmitProgressResponse> Handle(
+        SubmitLessonProgressCommand command,
+        CancellationToken ct)
+    {
+        // Business rule: 70% score required to complete a Grapeseed lesson
+        var isCompleted = command.ScorePercent >= 70;
+
+        var progress = new LessonProgress
+        {
+            StudentId = GetCurrentStudentId(),   // From HttpContext via injected ICurrentUser
+            Unit = command.Unit,
+            LessonNumber = command.LessonNumber,
+            ScorePercent = command.ScorePercent,
+            IsCompleted = isCompleted,
+            CompletedAt = isCompleted ? DateTime.UtcNow : null
+            // SchoolId is auto-set by DbContext.SaveChangesAsync override
+        };
+
+        _db.LessonProgress.Add(progress);
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "Progress submitted: Student in school {SchoolId}, {Unit} Lesson {Lesson}, Score {Score}%, Completed: {IsCompleted}",
+            command.SchoolId, command.Unit, command.LessonNumber, command.ScorePercent, isCompleted);
+
+        // Publish event to SQS for background processing (email, certificate, analytics)
+        await _eventBus.PublishAsync(new LessonCompletedMessage
+        {
+            SchoolId = command.SchoolId,
+            StudentId = progress.StudentId,
+            Unit = command.Unit,
+            LessonNumber = command.LessonNumber,
+            ScorePercent = command.ScorePercent,
+            IsCompleted = isCompleted
+        }, "lesson-completed", ct);
+
+        return new SubmitProgressResponse(
+            IsCompleted: isCompleted,
+            ScorePercent: command.ScorePercent,
+            Message: isCompleted
+                ? $"🎉 You completed {command.Unit}, Lesson {command.LessonNumber}!"
+                : "Keep practicing! You need 70% to complete this lesson.",
+            CertificateUrl: null  // NotificationService will generate it asynchronously
+        );
+    }
+    
+    private int GetCurrentStudentId() => /* from ICurrentUser service */ 0;
+}
+```
+
+### Queries — "Give Me Data, Don't Change Anything"
+
+Queries represent **read operations**. They return data and must not change state.
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Queries/GetStudentProgressQuery.cs
+// "What has this student completed in Grapeseed?"
+// ─────────────────────────────────────────────────────────────────
+public record GetStudentProgressQuery(int StudentId)
+    : IRequest<StudentProgressResponse>, ITenantRequest, ICachedQuery
+{
+    public string SchoolId { get; set; } = string.Empty;
+
+    // Cache this response in ElastiCache for 5 minutes
+    // (progress updates frequently during study sessions)
+    public string CacheKey => $"student-progress:{SchoolId}:{StudentId}";
+    public TimeSpan CacheDuration => TimeSpan.FromMinutes(5);
+}
+
+public record StudentProgressResponse(
+    int StudentId,
+    string StudentName,
+    string CurrentUnit,
+    int TotalLessonsCompleted,
+    double OverallAverageScore,
+    IReadOnlyList<UnitProgressSummary> UnitProgress
+);
+
+public record UnitProgressSummary(
+    string Unit,
+    int LessonsCompleted,
+    int TotalLessons,
+    double AverageScore,
+    bool IsUnitComplete
+);
+
+// The query handler — uses Read Replica, no writes
+public class GetStudentProgressQueryHandler
+    : IRequestHandler<GetStudentProgressQuery, StudentProgressResponse>
+{
+    private readonly GrapeseekReadDbContext _readDb; // Read Replica
+    private readonly ILogger<GetStudentProgressQueryHandler> _logger;
+
+    public GetStudentProgressQueryHandler(
+        GrapeseekReadDbContext readDb,
+        ILogger<GetStudentProgressQueryHandler> logger)
+    {
+        _readDb = readDb;
+        _logger = logger;
+    }
+
+    public async Task<StudentProgressResponse> Handle(
+        GetStudentProgressQuery request,
+        CancellationToken ct)
+    {
+        _logger.LogDebug("Fetching progress for student {StudentId}", request.StudentId);
+
+        // Single efficient query — no N+1, returns only what we need
+        // GlobalQueryFilter automatically adds WHERE SchoolId = @schoolId
+        var student = await _readDb.Students
+            .Where(s => s.Id == request.StudentId)
+            .Select(s => new
+            {
+                s.Id,
+                s.Name,
+                s.CurrentUnit,
+                Progress = s.Progress
+                    .GroupBy(p => p.Unit)
+                    .Select(g => new
+                    {
+                        Unit = g.Key,
+                        LessonsCompleted = g.Count(p => p.IsCompleted),
+                        AverageScore = g.Where(p => p.ScorePercent > 0).Average(p => (double?)p.ScorePercent) ?? 0
+                    })
+                    .ToList()
+            })
+            .FirstOrDefaultAsync(ct)
+            ?? throw new NotFoundException($"Student {request.StudentId} not found.");
+
+        var unitProgress = student.Progress
+            .Select(p => new UnitProgressSummary(
+                Unit: p.Unit,
+                LessonsCompleted: p.LessonsCompleted,
+                TotalLessons: GetTotalLessonsForUnit(p.Unit), // from config
+                AverageScore: p.AverageScore,
+                IsUnitComplete: p.LessonsCompleted >= GetTotalLessonsForUnit(p.Unit)
+            ))
+            .ToList();
+
+        return new StudentProgressResponse(
+            StudentId: student.Id,
+            StudentName: student.Name,
+            CurrentUnit: student.CurrentUnit,
+            TotalLessonsCompleted: student.Progress.Sum(p => p.LessonsCompleted),
+            OverallAverageScore: student.Progress.Any()
+                ? student.Progress.Average(p => p.AverageScore) : 0,
+            UnitProgress: unitProgress
+        );
+    }
+
+    private int GetTotalLessonsForUnit(string unit) =>
+        unit switch { "Unit 1" => 12, "Unit 2" => 12, "Unit 3" => 15, _ => 12 };
+}
+```
+
+### Notifications — "Tell Everyone Who Cares"
+
+Notifications are published to **zero or more handlers**. Perfect for in-process fan-out within a service (as opposed to cross-service events, which go through SQS).
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Notifications/StudentReachedMilestoneNotification.cs
+// Published when a student reaches a significant Grapeseed milestone
+// Multiple handlers can react to this within the same service
+// ─────────────────────────────────────────────────────────────────
+public record StudentReachedMilestoneNotification(
+    int StudentId,
+    string SchoolId,
+    string MilestoneType,    // "unit_complete", "first_lesson", "10_lessons"
+    string Unit
+) : INotification;
+
+// Handler 1: Update the student's profile with the milestone badge
+public class UpdateMilestoneBadgeHandler : INotificationHandler<StudentReachedMilestoneNotification>
+{
+    private readonly GrapeseekWriteDbContext _db;
+
+    public async Task Handle(StudentReachedMilestoneNotification notification, CancellationToken ct)
+    {
+        // Add the achievement badge to the student's profile
+        var badge = new StudentBadge
+        {
+            StudentId = notification.StudentId,
+            BadgeType = notification.MilestoneType,
+            Unit = notification.Unit,
+            EarnedAt = DateTime.UtcNow
+        };
+        _db.StudentBadges.Add(badge);
+        await _db.SaveChangesAsync(ct);
+    }
+}
+
+// Handler 2: Invalidate the student's progress cache so they see the badge immediately
+public class InvalidateProgressCacheHandler : INotificationHandler<StudentReachedMilestoneNotification>
+{
+    private readonly IDistributedCache _cache;
+    private readonly ILogger<InvalidateProgressCacheHandler> _logger;
+
+    public async Task Handle(StudentReachedMilestoneNotification notification, CancellationToken ct)
+    {
+        var cacheKey = $"student-progress:{notification.SchoolId}:{notification.StudentId}";
+        await _cache.RemoveAsync(cacheKey, ct);
+        _logger.LogInformation("Invalidated progress cache for student {StudentId}", notification.StudentId);
+    }
+}
+
+// How to publish a notification in a command handler:
+public class SomeCommandHandler : IRequestHandler<SomeCommand, SomeResponse>
+{
+    private readonly IMediator _mediator;
+
+    public async Task<SomeResponse> Handle(SomeCommand command, CancellationToken ct)
+    {
+        // ... business logic ...
+
+        // Publish to all registered INotificationHandlers
+        await _mediator.Publish(new StudentReachedMilestoneNotification(
+            StudentId: 123,
+            SchoolId: command.SchoolId,
+            MilestoneType: "unit_complete",
+            Unit: "Unit 3"
+        ), ct);
+
+        return new SomeResponse();
+    }
+}
+```
+
+---
+
+## 5. MediatR Pipeline Behaviors — The Full Stack
+
+We've seen individual behaviors in earlier chapters. Here is the **complete MediatR pipeline** for a Grapeseed service, showing all behaviors and their order:
+
+```
+HTTP Request → Controller → _mediator.Send(query/command)
+                                        │
+                            ┌───────────▼──────────────┐
+                            │    MediatR Pipeline        │
+                            │                           │
+                            │  1. LoggingBehavior       │ ← Log request start/end + duration
+                            │         │                 │
+                            │  2. TenantValidation      │ ← Validate school, stamp SchoolId
+                            │         │                 │
+                            │  3. FluentValidation      │ ← Validate request DTOs (rules)
+                            │         │                 │
+                            │  4. CachingBehavior       │ ← Check ElastiCache (for ICachedQuery)
+                            │         │                 │
+                            │  5. Handler               │ ← Actual business logic
+                            │                           │
+                            └───────────────────────────┘
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Program.cs — Complete MediatR pipeline registration
+// ─────────────────────────────────────────────────────────────────
+builder.Services.AddMediatR(cfg =>
+{
+    cfg.RegisterServicesFromAssemblyContaining<Program>();
+
+    // ORDER MATTERS — behaviors wrap each other like middleware layers
+    // Outermost first: LoggingBehavior → TenantValidation → Validation → Caching → Handler
+    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>));
+    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(TenantValidationBehavior<,>));
+    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(CachingBehavior<,>));
+});
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Behaviors/LoggingBehavior.cs — Logs every MediatR request
+// ─────────────────────────────────────────────────────────────────
+public class LoggingBehavior<TRequest, TResponse>
+    : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : notnull
+{
+    private readonly ILogger<LoggingBehavior<TRequest, TResponse>> _logger;
+
+    public LoggingBehavior(ILogger<LoggingBehavior<TRequest, TResponse>> logger)
+        => _logger = logger;
+
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken ct)
+    {
+        var requestName = typeof(TRequest).Name;
+        var stopwatch = Stopwatch.StartNew();
+
+        _logger.LogInformation("→ Handling {RequestName}", requestName);
+
+        try
+        {
+            var response = await next();
+            stopwatch.Stop();
+            _logger.LogInformation("✓ Handled {RequestName} in {ElapsedMs}ms",
+                requestName, stopwatch.ElapsedMilliseconds);
+            return response;
+        }
+        catch (Exception ex)
+        {
+            stopwatch.Stop();
+            _logger.LogError(ex, "✗ Error handling {RequestName} after {ElapsedMs}ms",
+                requestName, stopwatch.ElapsedMilliseconds);
+            throw;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Behaviors/ValidationBehavior.cs — FluentValidation integration
+// ─────────────────────────────────────────────────────────────────
+// Install: dotnet add package FluentValidation.AspNetCore
+public class ValidationBehavior<TRequest, TResponse>
+    : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : notnull
+{
+    private readonly IEnumerable<IValidator<TRequest>> _validators;
+
+    public ValidationBehavior(IEnumerable<IValidator<TRequest>> validators)
+        => _validators = validators;
+
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken ct)
+    {
+        if (_validators.Any())
+        {
+            var context = new ValidationContext<TRequest>(request);
+            var results = await Task.WhenAll(
+                _validators.Select(v => v.ValidateAsync(context, ct)));
+
+            var failures = results
+                .SelectMany(r => r.Errors)
+                .Where(f => f is not null)
+                .ToList();
+
+            if (failures.Any())
+                throw new ValidationException(failures);
+        }
+
+        return await next();
+    }
+}
+
+// Example validator for a Grapeseed command
+public class SubmitLessonProgressCommandValidator 
+    : AbstractValidator<SubmitLessonProgressCommand>
+{
+    public SubmitLessonProgressCommandValidator()
+    {
+        RuleFor(x => x.Unit)
+            .NotEmpty()
+            .Matches(@"^Unit \d{1,2}$")
+            .WithMessage("Unit must be in format 'Unit 1', 'Unit 2', etc.");
+
+        RuleFor(x => x.LessonNumber)
+            .InclusiveBetween(1, 20)
+            .WithMessage("Lesson number must be between 1 and 20.");
+
+        RuleFor(x => x.ScorePercent)
+            .InclusiveBetween(0, 100)
+            .WithMessage("Score must be between 0 and 100.");
+    }
+}
+```
+
+---
+
+## 6. Domain-Driven Design — Finding Service Boundaries
+
+The hardest part of microservices is knowing where to cut. Cut wrong and you get a **distributed monolith** — all the costs of microservices with none of the benefits. DDD's concept of **Bounded Contexts** gives us a principled approach.
+
+### The "Student" Problem in Grapeseed
+
+The word "student" means something different in each context:
+
+| Service Context | "Student" means... |
+|----------------|-------------------|
+| **IdentityService** | A user account: email, password hash, role ("student") |
+| **LessonService** | A learner: current unit, level, lesson assignments |
+| **ProgressService** | A record-keeper: completed lessons, quiz scores, certificates |
+| **VideoService** | A viewer: watch history, resume position, video preferences |
+| **NotificationService** | A recipient: email, push notification preferences, last notified |
+| **AnalyticsService** | A data point: aggregate scores, usage patterns, time-on-platform |
+
+If you build one giant `Student` class with 60 properties covering all of these, it becomes incoherent and unmaintainable. Instead, each service has its own lean model of a student, referencing others only by `StudentId`.
+
+### Finding Grapeseed's Bounded Contexts
+
+Look for these signals:
+- **Different rate of change** — Identity credentials change for security reasons; lesson content changes for curriculum reasons; billing changes for business reasons
+- **Different teams** — If a different team owns it, it's likely a different bounded context
+- **Different language** — When two teams call the same thing by different names, or the same word means different things
+
+---
+
+## 7. Designing Grapeseed's Services
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    LinguaLearn Service Map                           │
+│                   Grapeseed Service Map                             │
 │                                                                      │
-│  ┌───────────────────┐                                              │
-│  │   IdentityService │ ← Authentication, authorization, JWT tokens  │
-│  │   (C#, PostgreSQL)│   User credentials, roles, permissions       │
-│  └───────────────────┘                                              │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │                  AWS API Gateway                                │ │
+│  │  Routing · JWT Auth (Cognito/Custom) · Rate Limiting · WAF     │ │
+│  └──────┬──────────────┬──────────────────┬──────────────┬────────┘ │
+│         │              │                  │              │           │
+│  ┌──────▼───┐  ┌───────▼────┐  ┌─────────▼──┐  ┌───────▼───────┐  │
+│  │Identity  │  │  Lesson    │  │  Progress  │  │   Notification│  │
+│  │Service   │  │  Service   │  │  Service   │  │   Service     │  │
+│  │          │  │            │  │            │  │               │  │
+│  │Auth/Login│  │Lessons,    │  │Student     │  │Email via SES  │  │
+│  │JWT tokens│  │Quizzes,    │  │scores,     │  │Push via SNS   │  │
+│  │Password  │  │Assignments │  │Certificates│  │In-app alerts  │  │
+│  │          │  │            │  │            │  │               │  │
+│  │RDS PG    │  │RDS PG      │  │RDS PG      │  │No DB (SQS)    │  │
+│  └──────────┘  └────────────┘  └────────────┘  └───────────────┘  │
 │                                                                      │
-│  ┌───────────────────┐                                              │
-│  │   SchoolService   │ ← Tenant management, school settings         │
-│  │   (C#, PostgreSQL)│   Branding, features, subscription plans     │
-│  └───────────────────┘                                              │
+│  ┌───────────────┐  ┌─────────────────────────────────────────────┐ │
+│  │  Video        │  │  Analytics Service                          │ │
+│  │  Service      │  │                                             │ │
+│  │               │  │  School dashboards, platform reports        │ │
+│  │  Upload,      │  │  Usage statistics, completion rates         │ │
+│  │  Transcode,   │  │                                             │ │
+│  │  Stream       │  │  RDS SQL Server (T-SQL reporting queries)   │ │
+│  │               │  │  + Amazon QuickSight for dashboards         │ │
+│  │  S3 +         │  └─────────────────────────────────────────────┘ │
+│  │  CloudFront   │                                                   │
+│  │  + MediaConvert│  ┌─────────────────────────────────────────────┐ │
+│  └───────────────┘  │  SchoolService (Tenant Management)           │ │
+│                      │  School settings, license management         │ │
+│                      │  Subdomain → SchoolId mapping               │ │
+│                      │  RDS PostgreSQL                             │ │
+│                      └─────────────────────────────────────────────┘ │
 │                                                                      │
-│  ┌───────────────────┐                                              │
-│  │   LessonService   │ ← Lesson catalog, curriculum, quizzes        │
-│  │   (C#, PostgreSQL)│   Teacher-created content                    │
-│  └───────────────────┘                                              │
-│                                                                      │
-│  ┌───────────────────┐                                              │
-│  │   VideoService    │ ← Video storage, transcoding, streaming      │
-│  │   (Go, S3/CDN)    │   Watch history, progress tracking           │
-│  └───────────────────┘                                              │
-│                                                                      │
-│  ┌───────────────────┐                                              │
-│  │  ProgressService  │ ← Student progress, quiz scores, certificates│
-│  │   (C#, PostgreSQL)│   Learning analytics, completion records     │
-│  └───────────────────┘                                              │
-│                                                                      │
-│  ┌───────────────────┐                                              │
-│  │ NotificationService│ ← Email, push notifications, SMS            │
-│  │   (C#, Redis)     │   Template management, delivery tracking     │
-│  └───────────────────┘                                              │
-│                                                                      │
-│  ┌───────────────────┐                                              │
-│  │  AnalyticsService │ ← Platform-wide reports, school dashboards   │
-│  │  (Python, OLAP DB)│   Data aggregation, trend analysis           │
-│  └───────────────────┘                                              │
-│                                                                      │
-│  ┌───────────────────┐                                              │
-│  │    API Gateway    │ ← Single entry point for all client calls    │
-│  │   (Nginx/YARP)    │   Routing, auth validation, rate limiting    │
-│  └───────────────────┘                                              │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │   Amazon SQS / SNS  (Cross-Service Async Event Messaging)    │   │
+│  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-Each service:
-- Has **its own database** — complete data ownership
-- Has **its own Git repository** — independent codebase
-- Has **its own deployment pipeline** — deploy independently
-- Is **owned by one team** — clear responsibility
+**Tech stack per service:**
+
+| Service | Database | Key AWS Services |
+|---------|----------|-----------------|
+| IdentityService | RDS PostgreSQL | Cognito (or custom), Secrets Manager |
+| LessonService | RDS PostgreSQL | ElastiCache, SQS |
+| ProgressService | RDS PostgreSQL | ElastiCache, SQS, S3 (certificates) |
+| VideoService | S3 | CloudFront, MediaConvert, ElastiCache |
+| NotificationService | None (stateless) | SQS, SES, SNS |
+| AnalyticsService | RDS **SQL Server** | QuickSight, S3 (data exports) |
+| SchoolService | RDS PostgreSQL | ElastiCache, Secrets Manager |
+
+Note that **AnalyticsService uses SQL Server** — this is intentional. Complex OLAP queries, window functions, and reporting CTEs are where the analytics team has expertise in T-SQL. EF Core's SQL Server provider works seamlessly alongside the PostgreSQL provider in other services.
 
 ---
 
-## 5. Service Communication — Sync vs. Async
+## 8. Service Communication — Sync vs. Async
 
-Services need to talk to each other. The most important architecture decision in microservices is **how** services communicate.
+### Synchronous (HTTP between services)
 
-### Synchronous Communication (Request/Response)
-
-Service A sends a request to Service B and **waits** for a response before continuing.
-
-```
-LessonService → [HTTP GET] → VideoService
-LessonService ← [Response: VideoMetadata] ← VideoService
-```
-
-**When to use:** When the caller needs the response immediately to continue its work.
-
-**Example:** "Get the video metadata for Lesson 12 so I can include it in the lesson page response."
-
-**Risks:** 
-- If VideoService is down → LessonService call fails
-- Long chains of synchronous calls increase total latency multiplicatively
-- Creates **temporal coupling** — services must be up simultaneously
-
-### Asynchronous Communication (Events)
-
-Service A publishes an event to a message bus and **doesn't wait** for a response. Zero or more services consume that event.
-
-```
-ProgressService → [publish: StudentPassedQuiz event] → Message Bus
-                              ↓ (asynchronous)
-               ├─► NotificationService: send congratulations email
-               ├─► CertificateService: generate certificate PDF
-               └─► AnalyticsService: update completion statistics
-```
-
-**When to use:** When the action has side effects that don't need to happen immediately.
-
-**Example:** "A student passed a quiz. Eventually, they should get an email. We don't need to wait for the email to send before telling the student they passed."
-
-**Benefits:**
-- Decoupling — publishers don't know who consumes their events
-- Resilience — consumers can be down; events queue up and are processed when they recover
-- Scalability — add new consumers without changing the publisher
-
-### The Decision Matrix
-
-```
-                 Does the caller need the response immediately?
-                              │
-                    ┌─────────┴──────────┐
-                   YES                  NO
-                    │                    │
-            Synchronous              Asynchronous
-           (HTTP / gRPC)            (Events / Queue)
-                    │                    │
-          Response in < 500ms    Side effects: email, 
-          User waiting           analytics, cache updates,
-          for the result         audit logs, certificates
-```
-
----
-
-## 6. Building a Minimal API Service in C#
-
-Each microservice is a self-contained .NET application. .NET's **Minimal API** style is perfect for microservices — it's lightweight, fast to start up, and has minimal boilerplate.
+Use HTTP when the calling service needs the response immediately.
 
 ```csharp
-// ─────────────────────────────────────────────────────────────────
-// LessonService/Program.cs — A complete microservice entry point
-// ─────────────────────────────────────────────────────────────────
-using Microsoft.EntityFrameworkCore;
-using Serilog;
-
-var builder = WebApplication.CreateBuilder(args);
-
-// Structured logging with Serilog (essential for microservices observability)
-builder.Host.UseSerilog((context, config) =>
-    config.ReadFrom.Configuration(context.Configuration)
-          .Enrich.WithProperty("Service", "LessonService")
-          .Enrich.WithProperty("Environment", context.HostingEnvironment.EnvironmentName)
-          .WriteTo.Console()
-          .WriteTo.Seq("http://seq.monitoring.internal")); // Centralized log aggregator
-
-// Database
-builder.Services.AddDbContext<LessonDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("LessonDatabase")));
-
-// Tenant support (see Chapter 2)
-builder.Services.AddScoped<ITenantContext, TenantContext>();
-
-// Application services
-builder.Services.AddScoped<ILessonService, LessonService>();
-builder.Services.AddScoped<ILessonRepository, LessonRepository>();
-
-// HTTP client for calling Video Service (with Polly resilience)
-builder.Services.AddHttpClient<IVideoServiceClient, VideoServiceClient>(client =>
-    client.BaseAddress = new Uri(builder.Configuration["ServiceUrls:VideoService"]!))
-    .AddPolicyHandler(ResiliencePolicies.GetRetryPolicy())
-    .AddPolicyHandler(ResiliencePolicies.GetCircuitBreakerPolicy());
-
-// Health checks
-builder.Services.AddHealthChecks()
-    .AddDbContextCheck<LessonDbContext>("lesson-db")
-    .AddCheck("self", () => HealthCheckResult.Healthy());
-
-// Distributed cache
-builder.Services.AddStackExchangeRedisCache(options =>
-    options.Configuration = builder.Configuration.GetConnectionString("Redis"));
-
-// Rate limiting
-builder.Services.AddRateLimiter(options =>
-    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
-        context => RateLimitPartition.GetFixedWindowLimiter(
-            context.User?.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? "anon",
-            _ => new FixedWindowRateLimiterOptions { PermitLimit = 200, Window = TimeSpan.FromSeconds(1) })));
-
-// OpenTelemetry for distributed tracing (covered in Section 11)
-builder.Services.AddOpenTelemetry()
-    .WithTracing(tracing => tracing
-        .AddAspNetCoreInstrumentation()
-        .AddHttpClientInstrumentation()
-        .AddEntityFrameworkCoreInstrumentation()
-        .AddOtlpExporter()); // Sends traces to Jaeger/Tempo
-
-var app = builder.Build();
-
-app.UseMiddleware<TenantResolutionMiddleware>();
-app.UseRateLimiter();
-
-// ─────────────────────────────────────────────────────────────────
-// Lesson Endpoints — Minimal API style
-// ─────────────────────────────────────────────────────────────────
-
-var lessons = app.MapGroup("/api/lessons").RequireAuthorization();
-
-lessons.MapGet("/", async (ILessonService service) =>
-    Results.Ok(await service.GetAllAsync()));
-
-lessons.MapGet("/{id:int}", async (int id, ILessonService service) =>
+// LessonService needs video metadata to build the lesson page response.
+// It cannot return the lesson without this data — synchronous is correct.
+public class GetLessonWithVideoQueryHandler : IRequestHandler<GetLessonWithVideoQuery, LessonDetailResponse>
 {
-    var lesson = await service.GetByIdAsync(id);
-    return lesson is null ? Results.NotFound() : Results.Ok(lesson);
-});
+    private readonly GrapeseekReadDbContext _readDb;
+    private readonly IVideoServiceClient _videoClient; // HTTP client with Polly
 
-lessons.MapPost("/", async (CreateLessonRequest request, ILessonService service) =>
-{
-    var lesson = await service.CreateAsync(request);
-    return Results.CreatedAtRoute("GetLesson", new { lesson.Id }, lesson);
-});
+    public async Task<LessonDetailResponse> Handle(GetLessonWithVideoQuery request, CancellationToken ct)
+    {
+        // 1. Get lesson from this service's database
+        var lesson = await _readDb.Lessons
+            .FirstOrDefaultAsync(l => l.Unit == request.Unit && l.LessonNumber == request.LessonNumber, ct)
+            ?? throw new NotFoundException("Lesson not found");
 
-lessons.MapPut("/{id:int}", async (int id, UpdateLessonRequest request, ILessonService service) =>
-{
-    await service.UpdateAsync(id, request);
-    return Results.NoContent();
-});
-
-lessons.MapDelete("/{id:int}", async (int id, ILessonService service) =>
-{
-    await service.DeleteAsync(id);
-    return Results.NoContent();
-});
-
-// Health check endpoints for load balancer
-app.MapHealthChecks("/health");
-
-app.Run();
+        // 2. Get video metadata from VideoService (synchronous HTTP call)
+        var videoMetadata = await _videoClient.GetVideoMetadataAsync(lesson.VideoId, ct);
+        
+        // If VideoService is down (circuit breaker open), videoMetadata is null/fallback
+        // The lesson page still renders — just without video details
+        
+        return new LessonDetailResponse
+        {
+            Lesson = lesson,
+            Video = videoMetadata
+        };
+    }
+}
 ```
+
+### Asynchronous (SQS between services)
+
+Use SQS when the action has side effects that don't need to complete before the user gets their response.
+
+```
+Student submits quiz answer → ProgressService saves it → returns "Score: 85%" to student
+                                                ↓ (async, fire-and-forget)
+                                         SQS: "lesson-completed" queue
+                                         ├─► NotificationService: send email
+                                         ├─► AnalyticsService: update stats
+                                         └─► ProgressService: update unit completion
+```
+
+The student receives their score in ~50ms. The email, analytics update, and unit completion check happen over the next few seconds, invisibly in the background.
 
 ---
 
-## 7. The API Gateway — The Front Door
+## 9. AWS API Gateway — The Front Door
 
-In a microservices architecture, clients should not call individual services directly. Why? Because:
+AWS API Gateway acts as Grapeseed's single entry point for all client requests. It provides:
 
-1. **Each service has a different URL** — clients would need to know all service addresses
-2. **Auth should be centralized** — validating JWT tokens in every service is wasteful
-3. **Rate limiting** — better to apply it once at the gateway than in every service
-4. **SSL termination** — handle HTTPS once at the gateway; internal traffic can be plain HTTP
-5. **Request routing** — the gateway decides which service handles each request
+- **JWT validation** — validates Bearer tokens before forwarding to ECS services
+- **Routing** — forwards requests to the correct ECS service based on the URL path
+- **Rate limiting** — per-API-key or per-IP rate limiting at the edge (before ECS is involved)
+- **AWS WAF integration** — blocks malicious requests before they reach your services
+- **SSL termination** — HTTPS from client to API Gateway; internal traffic can be plain HTTP within the VPC
 
-The **API Gateway** is a single entry point that proxies all client requests to the appropriate backend service.
+```yaml
+# API Gateway routes (simplified — defined in AWS Console, CDK, or Terraform)
 
-```
-                        Client (Mobile App, Browser)
-                                  │
-                       HTTPS (443) Request
-                                  │
-                          ┌───────▼────────┐
-                          │   API Gateway  │
-                          │  (YARP/Nginx)  │
-                          │  ─────────── │
-                          │  - JWT Auth   │
-                          │  - Rate Limit │
-                          │  - Routing    │
-                          │  - SSL Term.  │
-                          └───────┬────────┘
-              ┌───────────────────┼────────────────────┐
-              │                   │                    │
-    GET /api/lessons   POST /api/quiz   GET /api/videos
-              │                   │                    │
-      [LessonService]    [ProgressService]    [VideoService]
+/api/auth/**        → IdentityService ALB (no auth required — login endpoint)
+/api/lessons/**     → LessonService ALB     (JWT required)
+/api/progress/**    → ProgressService ALB   (JWT required)
+/api/videos/**      → VideoService ALB      (JWT required)
+/api/analytics/**   → AnalyticsService ALB  (JWT + Admin role required)
+/api/schools/**     → SchoolService ALB     (JWT + Admin role required)
 ```
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// ApiGateway/Program.cs — YARP Reverse Proxy as API Gateway
-// Install: dotnet add package Yarp.ReverseProxy
+// Each ECS service trusts the API Gateway's auth validation.
+// Services still validate the JWT claims for fine-grained authorization,
+// but they don't need to call IdentityService on every request —
+// the JWT contains all necessary claims.
 // ─────────────────────────────────────────────────────────────────
-var builder = WebApplication.CreateBuilder(args);
-
-// Configure YARP reverse proxy
-builder.Services.AddReverseProxy()
-    .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
-
-// JWT authentication (validate tokens once at the gateway)
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
-        options.Authority = builder.Configuration["Auth:Authority"]; // Identity Service URL
-        options.Audience = "lingualearn-api";
+        // The signing key is loaded from AWS Secrets Manager
+        options.Authority = builder.Configuration["Auth:Issuer"];
+        options.Audience = "grapeseed-api";
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -446,669 +788,336 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateIssuerSigningKey = true
         };
     });
+```
+
+---
+
+## 10. Amazon SQS/SNS — Async Event Bus Between Services
+
+Grapeseed uses SQS and SNS for cross-service async communication.
+
+- **SQS (Simple Queue Service):** Point-to-point queues. One producer, one consumer group. Messages are deleted after successful processing.
+- **SNS (Simple Notification Service):** Fan-out (publish/subscribe). One producer, many consumers. Each consumer gets its own SQS queue fed by SNS.
+
+```
+SQS Only (point-to-point):
+  ProgressService → SQS queue → NotificationService
+  (Only NotificationService consumes this queue)
+
+SNS + SQS Fan-out (one event, many consumers):
+  ProgressService → SNS Topic: "student-unit-completed"
+                          │
+              ┌───────────┼───────────┐
+              │           │           │
+          SQS Queue   SQS Queue   SQS Queue
+              │           │           │
+         Analytics   Certificate  Notification
+          Service     Service      Service
+  (All three react to the same event independently)
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Publishing to an SNS topic (fan-out to multiple consumers)
+// ─────────────────────────────────────────────────────────────────
+public class SnsEventBus : IGrapeseekEventBus
+{
+    private readonly IAmazonSimpleNotificationService _snsClient;
+    private readonly IConfiguration _configuration;
+
+    public async Task PublishAsync<T>(T message, string topicName, CancellationToken ct = default)
+        where T : class
+    {
+        var topicArn = _configuration[$"AWS:SNS:Topics:{topicName}"];
+        var messageJson = JsonSerializer.Serialize(message);
+
+        await _snsClient.PublishAsync(new PublishRequest
+        {
+            TopicArn = topicArn,
+            Message = messageJson,
+            MessageAttributes = new Dictionary<string, MessageAttributeValue>
+            {
+                ["MessageType"] = new MessageAttributeValue
+                {
+                    DataType = "String",
+                    StringValue = typeof(T).Name
+                }
+            }
+        }, ct);
+    }
+}
+
+// Usage in a command handler:
+await _eventBus.PublishAsync(
+    new StudentCompletedUnitEvent
+    {
+        SchoolId = command.SchoolId,
+        StudentId = studentId,
+        Unit = "Unit 3",
+        CompletedAt = DateTime.UtcNow
+    },
+    topicName: "student-unit-completed",  // SNS Topic → fan-out to 3 SQS queues
+    ct);
+```
+
+---
+
+## 11. The Saga Pattern — Distributed Transactions
+
+**The problem:** When enrolling a new student in Grapeseed, multiple services must all succeed:
+1. IdentityService: create user account
+2. SchoolService: assign a school license
+3. LessonService: initialize lesson assignments for the school's curriculum
+4. NotificationService: send welcome email
+
+In a monolith with one database, this is a single database transaction — if step 3 fails, steps 1 and 2 are rolled back automatically.
+
+In microservices with separate databases, there is no single transaction. If step 3 fails after steps 1 and 2 completed, the student has an account and a license but no lesson assignments. The system is in an inconsistent state.
+
+**The Saga pattern** solves this with a sequence of local transactions, each publishing an event. If any step fails, **compensating transactions** undo what was already done.
+
+```
+Enrollment Saga — Success Path:
+─────────────────────────────────
+  1. SchoolService: creates enrollment request
+     → publishes: "CreateUserAccountCommand" to IdentityService
+  
+  2. IdentityService: creates account (StudentId: 901)
+     → publishes: "UserAccountCreated" event
+  
+  3. SchoolService: hears UserAccountCreated → assigns license
+     → publishes: "LicenseAssigned" event
+  
+  4. LessonService: hears LicenseAssigned → creates lesson assignments
+     → publishes: "LessonAssignmentsCreated" event
+  
+  5. NotificationService: hears LessonAssignmentsCreated → sends welcome email
+     → Saga complete ✅
+
+Enrollment Saga — Failure Path (step 4 fails — no licenses left):
+──────────────────────────────────────────────────────────────────
+  1-3. Same as above.
+  
+  4. SchoolService tries to assign license → fails (no licenses remaining!)
+     → publishes: "EnrollmentFailed" event
+  
+  5. IdentityService hears EnrollmentFailed → COMPENSATES by deleting the account
+  
+  6. SchoolService updates enrollment status to "Failed — No Licenses"
+  
+  Final state: clean. No orphaned account. Error reported to admin. ✅
+```
+
+The implementation of a production Saga can use the **MediatR notification system** for in-service coordination and **SQS/SNS** for cross-service coordination, or dedicated Saga frameworks like NServiceBus or MassTransit (which supports AWS SQS as its transport).
+
+---
+
+## 12. Resilience with Polly Between Services
+
+Every HTTP call from one Grapeseed service to another must be resilient. We covered Polly in Chapter 1. Here's the full setup for all service clients:
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Program.cs in LessonService — register all downstream HTTP clients
+// ─────────────────────────────────────────────────────────────────
+var combinedPolicy = Policy.WrapAsync(
+    ResiliencePolicies.GetCircuitBreakerPolicy(),
+    ResiliencePolicies.GetRetryPolicy());
+
+builder.Services
+    .AddHttpClient<IVideoServiceClient, VideoServiceClient>(c =>
+        c.BaseAddress = new Uri(config["ServiceUrls:VideoService"]!))
+    .AddPolicyHandler(combinedPolicy);
+
+builder.Services
+    .AddHttpClient<IProgressServiceClient, ProgressServiceClient>(c =>
+        c.BaseAddress = new Uri(config["ServiceUrls:ProgressService"]!))
+    .AddPolicyHandler(combinedPolicy);
+
+builder.Services
+    .AddHttpClient<ISchoolServiceClient, SchoolServiceClient>(c =>
+        c.BaseAddress = new Uri(config["ServiceUrls:SchoolService"]!))
+    .AddPolicyHandler(combinedPolicy);
+```
+
+The Polly circuit breaker patterns from Chapter 1 apply here — if VideoService is repeatedly failing, the circuit opens, LessonService returns a fallback response, and students still get their lesson page (just without video metadata temporarily).
+
+---
+
+## 13. Distributed Tracing with AWS X-Ray
+
+With 6+ services handling a single student request, debugging "why is the lesson page slow?" requires seeing the **full request journey** across all services.
+
+**AWS X-Ray** provides distributed tracing, integrated with ECS, API Gateway, and the .NET SDK.
+
+```
+X-Ray Trace: "GET /api/lessons/Unit3/1" — Total: 650ms
+────────────────────────────────────────────────────────────
+[API Gateway]          0ms    ─────────────────────── 650ms
+  [LessonService]      12ms   ──────────────────────── 630ms
+    [ElastiCache]      14ms   ─ 2ms (MISS — first hit of day)
+    [RDS Read Replica] 17ms   ──── 8ms (lesson content query OK)
+    [VideoService]     26ms   ──────────────────────── 610ms  ← SLOW
+      [RDS Read Replica] 28ms ─────────────────────── 600ms  ← Slow query!
+        Missing Index!  ← X-Ray shows this query took 600ms
+```
+
+```csharp
+// Install: dotnet add package AWSSDK.XRay
+//          dotnet add package Amazon.XRay.Recorder.Handlers.AspNetCore
+//          dotnet add package Amazon.XRay.Recorder.Handlers.SqlServer
+
+// ─────────────────────────────────────────────────────────────────
+// Program.cs — X-Ray instrumentation
+// ─────────────────────────────────────────────────────────────────
+// Register the X-Ray recorder
+AWSXRayRecorder.InitializeInstance(builder.Configuration);
 
 var app = builder.Build();
-app.UseAuthentication();
-app.UseAuthorization();
-app.MapReverseProxy(); // YARP handles routing based on config
-app.Run();
-```
 
-```json
-// appsettings.json — YARP routing configuration
-{
-  "ReverseProxy": {
-    "Routes": {
-      "lessons-route": {
-        "ClusterId": "lesson-service",
-        "AuthorizationPolicy": "default",
-        "Match": { "Path": "/api/lessons/{**catch-all}" }
-      },
-      "progress-route": {
-        "ClusterId": "progress-service",
-        "AuthorizationPolicy": "default",
-        "Match": { "Path": "/api/progress/{**catch-all}" }
-      },
-      "video-route": {
-        "ClusterId": "video-service",
-        "AuthorizationPolicy": "default",
-        "Match": { "Path": "/api/videos/{**catch-all}" }
-      },
-      "public-route": {
-        "ClusterId": "identity-service",
-        "Match": { "Path": "/api/auth/{**catch-all}" }
-      }
-    },
-    "Clusters": {
-      "lesson-service": {
-        "Destinations": {
-          "lesson-service-1": { "Address": "http://lesson-service:8080" }
-        }
-      },
-      "progress-service": {
-        "Destinations": {
-          "progress-service-1": { "Address": "http://progress-service:8080" }
-        }
-      },
-      "video-service": {
-        "Destinations": {
-          "video-service-1": { "Address": "http://video-service:8080" }
-        }
-      }
-    }
-  }
-}
-```
+// X-Ray middleware — creates a segment for each HTTP request
+app.UseXRay("GrapeseekLessonService");
 
----
-
-## 8. The Event Bus — Async Communication with MassTransit
-
-The event bus is the nervous system of a microservices architecture. It allows services to communicate without knowing about each other.
-
-### Publishing Events
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// Shared contracts library: LinguaLearn.Contracts
-// Events are shared type definitions used by publishers and consumers
-// ─────────────────────────────────────────────────────────────────
-
-// LinguaLearn.Contracts/Events/StudentEvents.cs
-namespace LinguaLearn.Contracts.Events;
-
-// Published by: ProgressService
-// Consumed by: NotificationService, CertificateService, AnalyticsService
-public record StudentCompletedLessonEvent
-{
-    public Guid EventId { get; init; } = Guid.NewGuid();
-    public DateTime OccurredAt { get; init; } = DateTime.UtcNow;
-    public string TenantId { get; init; } = string.Empty;
-    public int StudentId { get; init; }
-    public int LessonId { get; init; }
-    public int ScorePercent { get; init; }
-    public bool Passed { get; init; }
-    public int TotalLessonsCompleted { get; init; }
-}
-
-// Published by: IdentityService when a new student registers
-public record StudentRegisteredEvent
-{
-    public Guid EventId { get; init; } = Guid.NewGuid();
-    public DateTime OccurredAt { get; init; } = DateTime.UtcNow;
-    public string TenantId { get; init; } = string.Empty;
-    public int StudentId { get; init; }
-    public string StudentName { get; init; } = string.Empty;
-    public string Email { get; init; } = string.Empty;
-}
+// Note: For ECS Fargate, the X-Ray daemon runs as a sidecar container.
+// Add to your ECS task definition:
+// {
+//   "name": "xray-daemon",
+//   "image": "amazon/aws-xray-daemon",
+//   "essential": false
+// }
 ```
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// ProgressService — Publishing an event when a student completes a lesson
+// Adding custom X-Ray annotations in MediatR handlers
 // ─────────────────────────────────────────────────────────────────
-public class QuizCompletionService : IQuizCompletionService
+public class GetLessonWithVideoQueryHandler : IRequestHandler<GetLessonWithVideoQuery, LessonDetailResponse>
 {
-    private readonly IProgressRepository _repository;
-    private readonly IPublishEndpoint _bus;  // MassTransit publish endpoint
-    private readonly ITenantContext _tenant;
-
-    public QuizCompletionService(
-        IProgressRepository repository,
-        IPublishEndpoint bus,
-        ITenantContext tenant)
+    public async Task<LessonDetailResponse> Handle(GetLessonWithVideoQuery request, CancellationToken ct)
     {
-        _repository = repository;
-        _bus = bus;
-        _tenant = tenant;
-    }
+        // Add custom metadata to the X-Ray trace
+        AWSXRayRecorder.Instance.AddAnnotation("SchoolId", request.SchoolId);
+        AWSXRayRecorder.Instance.AddAnnotation("Unit", request.Unit);
+        AWSXRayRecorder.Instance.AddAnnotation("LessonNumber", request.LessonNumber.ToString());
 
-    public async Task<QuizResult> RecordCompletionAsync(int studentId, int lessonId, int scorePercent)
-    {
-        var passed = scorePercent >= 70; // Passing score is 70%
-
-        // Save to our own database
-        var progress = new LessonProgress
-        {
-            StudentId = studentId,
-            LessonId = lessonId,
-            ScorePercent = scorePercent,
-            IsCompleted = passed,
-            CompletedAt = DateTime.UtcNow
-        };
-        await _repository.SaveProgressAsync(progress);
-
-        var totalCompleted = await _repository.GetCompletedCountAsync(studentId);
-
-        // Publish event — other services will react to this
-        // ProgressService doesn't care WHO reacts or HOW MANY react
-        await _bus.Publish(new StudentCompletedLessonEvent
-        {
-            TenantId = _tenant.TenantId,
-            StudentId = studentId,
-            LessonId = lessonId,
-            ScorePercent = scorePercent,
-            Passed = passed,
-            TotalLessonsCompleted = totalCompleted
-        });
-
-        return new QuizResult { Passed = passed, Score = scorePercent };
-    }
-}
-```
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// NotificationService — Consuming the event
-// ─────────────────────────────────────────────────────────────────
-public class LessonCompletedEmailConsumer : IConsumer<StudentCompletedLessonEvent>
-{
-    private readonly IEmailTemplateService _emailService;
-    private readonly IStudentQueryService _studentQuery;
-    private readonly ILogger<LessonCompletedEmailConsumer> _logger;
-
-    public async Task Consume(ConsumeContext<StudentCompletedLessonEvent> context)
-    {
-        var ev = context.Message;
-        
-        // Only send email if the student passed
-        if (!ev.Passed)
-        {
-            _logger.LogDebug("Student {StudentId} did not pass. Skipping notification.", ev.StudentId);
-            return;
-        }
-
-        // Query the Identity Service to get the student's email
-        // (NotificationService doesn't store student emails in its own DB)
-        var student = await _studentQuery.GetStudentContactInfoAsync(ev.StudentId);
-        if (student is null) return;
-
-        await _emailService.SendTemplatedEmailAsync(
-            to: student.Email,
-            templateName: "lesson_completed",
-            data: new
+        // Create a sub-segment for the video service call
+        return await AWSXRayRecorder.Instance.TraceMethodAsync(
+            "GetLessonWithVideo",
+            async () =>
             {
-                StudentName = student.Name,
-                LessonId = ev.LessonId,
-                Score = ev.ScorePercent,
-                TotalCompleted = ev.TotalLessonsCompleted,
-                // Show special message if they hit milestone completions
-                IsMilestone = ev.TotalLessonsCompleted % 10 == 0
-            }
-        );
-
-        _logger.LogInformation("Sent lesson completion email to {Email} for lesson {LessonId}",
-            student.Email, ev.LessonId);
+                var lesson = await GetLessonAsync(request);
+                var video = await GetVideoMetadataAsync(lesson.VideoId, ct);
+                return BuildResponse(lesson, video);
+            });
     }
 }
 ```
 
----
-
-## 9. The Saga Pattern — Distributed Transactions
-
-Here's a problem that trips up everyone new to microservices: **ACID transactions don't work across service boundaries.**
-
-In a monolith with one database, if you want to enroll a student in a school (which involves creating a user account, assigning a school license, initializing progress records, and sending a welcome email), you wrap it all in a database transaction. If any step fails, everything rolls back.
-
-In microservices, these steps span four different services, each with their own database. There is no distributed transaction manager (and even if there were, it would be a catastrophic performance bottleneck).
-
-The solution is the **Saga pattern** — a sequence of local transactions coordinated by events or commands. If a step fails, **compensating transactions** undo the previous steps.
-
-### Choreography Saga (Event-Driven)
-
-Each service listens for an event and publishes the next event in response. No central coordinator.
-
-```
-Student Registration Saga (Choreography):
-
-1. IdentityService creates user account
-   → publishes: UserAccountCreated
-
-2. SchoolService hears UserAccountCreated
-   → assigns school license, initializes student settings
-   → publishes: StudentEnrolled (success)
-   → OR publishes: StudentEnrollmentFailed (if no licenses available)
-
-3. ProgressService hears StudentEnrolled
-   → initializes progress records (first lesson unlocked)
-   → publishes: ProgressInitialized
-
-4. NotificationService hears ProgressInitialized
-   → sends welcome email
-   → publishes: WelcomeEmailSent
-
-If ANY step fails:
-   SchoolService publishes: StudentEnrollmentFailed
-   IdentityService hears it → deletes the user account (compensating transaction)
-   → Student sees: "Enrollment failed. Please try again."
-```
-
-### Orchestration Saga (Central Coordinator)
-
-A dedicated Saga Orchestrator service directs each step and handles failures. More explicit control flow.
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// StudentEnrollmentSaga.cs — MassTransit Saga with State Machine
-// Install: dotnet add package MassTransit
-// ─────────────────────────────────────────────────────────────────
-public class StudentEnrollmentState : SagaStateMachineInstance
-{
-    public Guid CorrelationId { get; set; }
-    public string CurrentState { get; set; } = string.Empty;
-
-    // Track saga data across steps
-    public string TenantId { get; set; } = string.Empty;
-    public int StudentId { get; set; }
-    public string StudentEmail { get; set; } = string.Empty;
-    public string StudentName { get; set; } = string.Empty;
-    public bool UserAccountCreated { get; set; }
-    public bool LicenseAssigned { get; set; }
-    public bool ProgressInitialized { get; set; }
-    public string? FailureReason { get; set; }
-}
-
-public class StudentEnrollmentSaga : MassTransitStateMachine<StudentEnrollmentState>
-{
-    // States in the saga lifecycle
-    public State CreatingUser { get; private set; } = null!;
-    public State AssigningLicense { get; private set; } = null!;
-    public State InitializingProgress { get; private set; } = null!;
-    public State SendingWelcomeEmail { get; private set; } = null!;
-    public State Completed { get; private set; } = null!;
-    public State Failed { get; private set; } = null!;
-
-    // Events that trigger state transitions
-    public Event<EnrollStudentCommand> EnrollStudent { get; private set; } = null!;
-    public Event<UserAccountCreatedEvent> UserAccountCreated { get; private set; } = null!;
-    public Event<LicenseAssignedEvent> LicenseAssigned { get; private set; } = null!;
-    public Event<ProgressInitializedEvent> ProgressInitialized { get; private set; } = null!;
-    public Event<EnrollmentStepFailedEvent> StepFailed { get; private set; } = null!;
-
-    public StudentEnrollmentSaga()
-    {
-        InstanceState(x => x.CurrentState);
-
-        // ── Step 1: Receive enrollment command ──────────────────────────
-        Initially(
-            When(EnrollStudent)
-                .Then(context =>
-                {
-                    context.Saga.TenantId = context.Message.TenantId;
-                    context.Saga.StudentEmail = context.Message.Email;
-                    context.Saga.StudentName = context.Message.Name;
-                    Log.Information("Starting enrollment saga for {Email}", context.Message.Email);
-                })
-                // Tell IdentityService to create the user account
-                .PublishAsync(context => context.Init<CreateUserAccountCommand>(new
-                {
-                    context.Saga.TenantId,
-                    context.Saga.StudentEmail,
-                    context.Saga.StudentName
-                }))
-                .TransitionTo(CreatingUser)
-        );
-
-        // ── Step 2: User account created → assign license ───────────────
-        During(CreatingUser,
-            When(UserAccountCreated)
-                .Then(context =>
-                {
-                    context.Saga.StudentId = context.Message.StudentId;
-                    context.Saga.UserAccountCreated = true;
-                })
-                .PublishAsync(context => context.Init<AssignSchoolLicenseCommand>(new
-                {
-                    context.Saga.TenantId,
-                    context.Saga.StudentId
-                }))
-                .TransitionTo(AssigningLicense),
-
-            // If this step fails, there's nothing to compensate yet
-            When(StepFailed)
-                .Then(context => context.Saga.FailureReason = context.Message.Reason)
-                .TransitionTo(Failed)
-        );
-
-        // ── Step 3: License assigned → initialize progress ──────────────
-        During(AssigningLicense,
-            When(LicenseAssigned)
-                .Then(context => context.Saga.LicenseAssigned = true)
-                .PublishAsync(context => context.Init<InitializeStudentProgressCommand>(new
-                {
-                    context.Saga.TenantId,
-                    context.Saga.StudentId
-                }))
-                .TransitionTo(InitializingProgress),
-
-            // Compensate: license assignment failed → delete the user account
-            When(StepFailed)
-                .Then(context => context.Saga.FailureReason = context.Message.Reason)
-                .PublishAsync(context => context.Init<DeleteUserAccountCommand>(new
-                {
-                    context.Saga.StudentId  // Roll back Step 1
-                }))
-                .TransitionTo(Failed)
-        );
-
-        // ── Step 4: Progress initialized → send welcome email ───────────
-        During(InitializingProgress,
-            When(ProgressInitialized)
-                .Then(context => context.Saga.ProgressInitialized = true)
-                .PublishAsync(context => context.Init<SendWelcomeEmailCommand>(new
-                {
-                    context.Saga.StudentEmail,
-                    context.Saga.StudentName,
-                    context.Saga.TenantId
-                }))
-                .TransitionTo(Completed) // Enrollment is complete; email is best-effort
-        );
-
-        // ── Final states ─────────────────────────────────────────────────
-        SetCompletedWhenFinalized();
-    }
-}
-```
-
-The Saga pattern guarantees that **either all steps eventually complete, or compensating transactions undo completed steps**. It achieves distributed consistency without the performance penalty of a distributed lock or two-phase commit.
+X-Ray traces are visible in the **AWS X-Ray Console** and can be correlated with **CloudWatch Logs** via the Trace ID header that propagates through all HTTP calls.
 
 ---
 
-## 10. Resilience with Polly — Calling Other Services Safely
+## 14. The Grapeseed Scenario — Student Enrollment
 
-When a service calls another service, it must be resilient to failures. We covered Polly in Chapter 1, but let's look at the microservices-specific patterns.
+Let's trace a complete student enrollment through Grapeseed's microservices:
 
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// ResiliencePolicies.cs — Reusable policies for service-to-service calls
-// ─────────────────────────────────────────────────────────────────
-public static class ResiliencePolicies
-{
-    // A combined policy: Retry inside a Circuit Breaker
-    // The Polly "PolicyWrap" applies policies from outer to inner
-    public static IAsyncPolicy<HttpResponseMessage> GetCombinedPolicy()
-    {
-        return Policy.WrapAsync(
-            GetCircuitBreakerPolicy(),  // Outer: circuit breaker
-            GetRetryPolicy(),           // Inner: retry (only retries when circuit is closed)
-            GetTimeoutPolicy()          // Innermost: timeout per attempt
-        );
-    }
+```
+A school administrator uploads 300 new student emails via the School Admin Portal.
 
-    public static IAsyncPolicy<HttpResponseMessage> GetRetryPolicy()
-    {
-        var jitter = new Random();
-        return HttpPolicyExtensions
-            .HandleTransientHttpError()
-            .WaitAndRetryAsync(3, retryAttempt =>
-                TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)) +
-                TimeSpan.FromMilliseconds(jitter.Next(0, 100)));
-    }
+1. POST /api/schools/bulk-enroll → AWS API Gateway
+   - JWT validated (admin role confirmed)
+   - Request forwarded to SchoolService
 
-    public static IAsyncPolicy<HttpResponseMessage> GetCircuitBreakerPolicy()
-    {
-        return HttpPolicyExtensions
-            .HandleTransientHttpError()
-            .CircuitBreakerAsync(5, TimeSpan.FromSeconds(30));
-    }
+2. SchoolService MediatR pipeline:
+   LoggingBehavior → TenantValidationBehavior → ValidationBehavior → Handler
+   
+   BulkEnrollStudentsCommandHandler:
+   - Validates CSV format
+   - For each student: publishes "EnrollStudentCommand" to SQS queue
+   - Returns: { "message": "300 enrollments queued", "trackingId": "bulk-001" }
+   
+   Admin sees result in 200ms. They don't wait for 300 enrollments.
 
-    public static IAsyncPolicy<HttpResponseMessage> GetTimeoutPolicy()
-    {
-        // Each individual attempt (before retry) must complete within 5 seconds
-        return Policy.TimeoutAsync<HttpResponseMessage>(5);
-    }
-}
+3. EnrollmentProcessor (background ECS task reads SQS):
+   For each student, the Saga executes:
+   
+   Step 1: IdentityService — POST /api/identity/create-student-account
+           → { studentId: 9001, email: "student@school.th" }
+           → Publishes: "UserAccountCreated" to SNS topic
+   
+   Step 2: SchoolService — hears UserAccountCreated
+           → Assigns 1 of school's 300 remaining licenses
+           → Publishes: "LicenseAssigned" to SNS topic
+   
+   Step 3: LessonService — hears LicenseAssigned
+           → Creates lesson assignments (Units 1-6, all lessons) for this student
+           → EF Core bulk insert with tenant auto-fill (SchoolId auto-set)
+           → Publishes: "LessonAssignmentsCreated" to SNS topic
+   
+   Step 4: NotificationService — hears LessonAssignmentsCreated
+           → Sends welcome email via Amazon SES:
+             "Welcome to Grapeseed! Your login is ready at school.grapeseed.com"
+   
+   FAILURE CASE: If the school has only 250 licenses and tries to enroll 300:
+   - First 250 students: succeed (LicenseAssigned)
+   - Students 251-300: "LicenseAssignmentFailed" event published
+   - Saga compensating action: IdentityService deletes accounts 251-300
+   - Admin dashboard shows: "250 enrolled ✅, 50 failed ❌ (insufficient licenses)"
+
+4. After 300 enrollments (typically 2-3 minutes):
+   - Admin dashboard shows real-time status updates (via WebSocket or polling)
+   - All 250 students can log in immediately
+   - Their lesson dashboards show Unit 1, Lesson 1 ready to start
 ```
 
 ---
 
-## 11. Distributed Tracing and Observability
+## 15. When NOT to Use Microservices
 
-Here's a scenario: A student reports that loading the lesson page takes 8 seconds sometimes. You look at the Lesson Service logs — it shows the request completed in 200ms. So where did the other 7.8 seconds go?
+This section may be the most important in the chapter.
 
-The request touched 4 services: API Gateway → Lesson Service → Video Service → CDN check. The slowness is in the Video Service, but looking at Lesson Service logs, you'd never know that.
-
-**Distributed tracing** gives you a complete timeline of a request as it flows through multiple services.
-
-```
-Trace ID: 8f3a-29cd-beef-cafe
-────────────────────────────────────────────────────────────────
-[API Gateway]          0ms     ─────────────────── 8,200ms
-  [Lesson Service]     10ms    ──────────────────── 8,180ms
-    [Redis Cache]      12ms    ─ 2ms (MISS)
-    [Lesson DB]        15ms    ─── 5ms (query OK)
-    [Video Service call] 20ms  ────────────────── 8,160ms  ← HERE!
-      [Video DB query]   21ms  ─────────────────── 8,150ms ← Slow query!
-    [Response built]   8,165ms ── 15ms
-  [Return to gateway]  8,180ms ─ 20ms
-────────────────────────────────────────────────────────────────
-Total: 8,200ms. Problem identified: Video DB slow query.
-```
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// Program.cs — OpenTelemetry distributed tracing setup
-// Install: dotnet add package OpenTelemetry.Extensions.Hosting
-//          dotnet add package OpenTelemetry.Instrumentation.AspNetCore
-//          dotnet add package OpenTelemetry.Instrumentation.HttpClient
-//          dotnet add package OpenTelemetry.Exporter.Otlp
-// ─────────────────────────────────────────────────────────────────
-builder.Services.AddOpenTelemetry()
-    .WithTracing(tracing =>
-    {
-        tracing
-            // Auto-instrument incoming HTTP requests
-            .AddAspNetCoreInstrumentation(options =>
-            {
-                options.RecordException = true;
-                options.Filter = context => !context.Request.Path.StartsWithSegments("/health");
-            })
-            // Auto-instrument outgoing HTTP calls (to other services)
-            .AddHttpClientInstrumentation(options => options.RecordException = true)
-            // Auto-instrument EF Core database calls
-            .AddEntityFrameworkCoreInstrumentation(options => options.SetDbStatementForText = true)
-            // Name this service in the trace
-            .AddSource("LessonService")
-            // Export traces to Jaeger or Grafana Tempo
-            .AddOtlpExporter(options =>
-                options.Endpoint = new Uri(builder.Configuration["Telemetry:OtlpEndpoint"]!));
-    });
-```
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// Adding custom spans to trace business-level operations
-// ─────────────────────────────────────────────────────────────────
-public class LessonService : ILessonService
-{
-    private static readonly ActivitySource ActivitySource = new("LessonService");
-    private readonly ILessonRepository _repository;
-    private readonly IVideoServiceClient _videoClient;
-
-    public async Task<LessonDetailResponse?> GetLessonWithVideoAsync(int lessonId)
-    {
-        // Create a custom span for this operation
-        using var activity = ActivitySource.StartActivity("GetLessonWithVideo");
-        activity?.SetTag("lesson.id", lessonId);
-
-        var lesson = await _repository.GetByIdAsync(lessonId);
-        if (lesson is null) return null;
-
-        using var videoActivity = ActivitySource.StartActivity("FetchVideoMetadata");
-        videoActivity?.SetTag("video.id", lesson.VideoId);
-
-        var videoMetadata = await _videoClient.GetVideoMetadataAsync(lesson.VideoId);
-
-        videoActivity?.SetTag("video.duration_seconds", videoMetadata?.DurationSeconds);
-        activity?.SetTag("lesson.unit", lesson.Unit);
-        activity?.SetTag("lesson.level", lesson.Level);
-
-        return new LessonDetailResponse
-        {
-            Lesson = lesson,
-            VideoMetadata = videoMetadata
-        };
-    }
-}
-```
-
-The propagation of trace context across service calls is handled automatically by OpenTelemetry. When Lesson Service calls Video Service via `HttpClient`, it injects a `traceparent` header into the request. Video Service reads this header and continues the same trace. All spans from all services are stitched together by the trace ID.
-
----
-
-## 12. Service Mesh — Managing Service-to-Service Traffic
-
-As the number of microservices grows, managing service-to-service traffic becomes complex:
-- How do you enforce mTLS (mutual TLS) between every pair of services?
-- How do you apply rate limiting at the service-to-service level?
-- How do you route traffic for canary deployments (send 10% of traffic to the new version)?
-
-A **service mesh** handles all of this transparently, without changing your application code. It deploys a lightweight **sidecar proxy** (usually Envoy) alongside every service. All traffic in and out of a service goes through the sidecar.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│   Service Mesh (e.g., Istio, Linkerd)                           │
-│                                                                   │
-│  ┌──────────────────┐         ┌──────────────────┐             │
-│  │  LessonService   │         │  VideoService     │             │
-│  │  ┌────────────┐  │  mTLS   │  ┌────────────┐  │             │
-│  │  │  App Code  │  │◄───────►│  │  App Code  │  │             │
-│  │  └────────────┘  │         │  └────────────┘  │             │
-│  │  ┌────────────┐  │         │  ┌────────────┐  │             │
-│  │  │   Envoy    │  │         │  │   Envoy    │  │             │
-│  │  │  (sidecar) │  │         │  │  (sidecar) │  │             │
-│  │  └────────────┘  │         │  └────────────┘  │             │
-│  └──────────────────┘         └──────────────────┘             │
-│                                                                   │
-│  Control Plane (Istiod):                                         │
-│  - Configures all sidecars centrally                             │
-│  - Issues mTLS certificates                                      │
-│  - Enforces traffic policies                                     │
-│  - Collects telemetry from all sidecars                          │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-Service meshes are appropriate when you have 10+ microservices and need centralized traffic management. For smaller deployments, Polly + YARP is sufficient.
-
----
-
-## 13. The Education Platform Scenario — Student Enrollment
-
-Let's trace the complete enrollment flow through LinguaLearn's microservices:
-
-```
-A new school signs up. Their administrator creates the first batch of student accounts.
-
-1. Admin uploads a CSV with 500 student emails via the School Admin Portal.
-
-2. API Gateway receives the request:
-   - Validates the JWT token (admin role confirmed)
-   - Routes to SchoolService: POST /api/schools/{tenantId}/students/bulk-enroll
-
-3. SchoolService:
-   - Validates the CSV format
-   - For each student, publishes a "EnrollStudent" command to the message bus
-   - Returns immediately: "500 enrollments queued. Check dashboard for progress."
-
-4. The StudentEnrollmentSaga begins for each student (running in parallel):
-
-   Step A → IdentityService: Create user account
-            → Publishes: UserAccountCreated (StudentId: 1001)
-
-   Step B → SchoolService: Assigns one of the school's 500 purchased licenses
-            → Publishes: LicenseAssigned (StudentId: 1001)
-
-   Step C → ProgressService: Creates initial progress record
-            → First lesson unlocked automatically
-            → Publishes: ProgressInitialized (StudentId: 1001)
-
-   Step D → NotificationService: Sends welcome email
-            → Uses templated email with school branding
-            → Student receives: "Welcome to Tokyo English Academy!"
-
-5. If ANY step fails (e.g., the school ran out of licenses):
-   - Saga compensates: deletes the user account
-   - Admin dashboard shows: "Student emma@example.com: Enrollment failed - No licenses remaining"
-
-6. After all 500 students processed (5-10 minutes later):
-   - Admin sees: "498 enrolled successfully, 2 failed (insufficient licenses)"
-   - All 498 students can now log in immediately
-
-The admin never waits. The system handles 500 concurrent enrollments reliably.
-Each service did its job independently. The Saga ensured data consistency without 
-a distributed transaction.
-```
-
----
-
-## 14. The Microservices Trap — When NOT to Use Them
-
-This section might be the most important in this chapter. The technology industry goes through hype cycles, and microservices had a massive hype peak in the 2015-2020 period. Many companies adopted them without genuinely needing them, and paid a steep price.
-
-### Signs You're Not Ready for Microservices
+### Signs You're Not Ready
 
 **"We have 3 developers."**
-Microservices are an organizational scaling solution. Three developers cannot own, maintain, and operate 7 different services effectively. Each service needs its own CI/CD, monitoring, and alerting. Three developers will be overwhelmed by operations before they finish any features.
+Each microservice needs its own ECS service, RDS instance, CI/CD pipeline, CloudWatch alarms, and on-call rotation. Three developers will spend 80% of their time on infrastructure operations.
 
-**"Our monolith is slow and messy."**
-A messy monolith usually means messy code — which becomes messy microservices. The boundary problems, the coupling issues — they follow you into microservices if you haven't understood the domain well. First, clean up the monolith's internal architecture. Only then consider extracting services.
+**"Our codebase is messy."**
+Messy code becomes messy microservices. Fix the architecture inside the monolith first. MediatR CQRS with clean command/query handlers is a great step — it's the same pattern you'd use in microservices, just within one process.
 
-**"We heard Netflix uses microservices."**
-Netflix has 2,000+ engineers and processes 15+ billion requests per day. At that scale, microservices are the only viable option. At your scale, they are likely premature. As the saying goes: "Don't scale your architecture to Netflix's problems until you have Netflix's problems."
+**"We want to use different AWS services."**
+That's fine — you can use different RDS configurations, different S3 buckets, and different ECS task sizes within a monolith. Microservices are about team ownership and deployment independence, not just technology choices.
 
-**"We want to use different technologies."**
-This is a legitimate reason — but be honest about whether you actually need different technologies now or just think you might someday.
+### The Strangler Fig Pattern for Grapeseed
 
-### The Strangler Fig Pattern — Migrating Safely
-
-If you have a monolith that needs to become microservices, the **Strangler Fig Pattern** is the safe way to do it. Named after a fig tree that grows around a host tree and gradually replaces it.
+If starting from a monolith, extract one service at a time:
 
 ```
 Phase 1: Monolith handles everything
-  Client → Monolith → Database
+  Client → ALB → GrapeseekMonolith ECS → Single RDS PostgreSQL
 
-Phase 2: Extract one service (e.g., VideoService)
-  Client → API Gateway → VideoService (new)
-                      → Monolith (everything else)
-  
-Phase 3: Extract another service (e.g., NotificationService)
-  Client → API Gateway → VideoService (new)
-                      → NotificationService (new)
-                      → Monolith (shrinking)
+Phase 2: Extract NotificationService (fewest dependencies)
+  Client → API Gateway → NotificationService ECS (new)
+                      → GrapeseekMonolith (shrinking)
 
-Phase 4: Continue until the monolith is gone
-  Client → API Gateway → Service A
-                      → Service B
-                      → Service C (no more monolith)
+Phase 3: Extract VideoService (different scaling profile)
+  Client → API Gateway → VideoService ECS (new)
+                      → NotificationService ECS
+                      → GrapeseekMonolith (shrinking)
+
+...continue until the monolith is fully decomposed...
 ```
 
-Never try to rewrite everything from scratch. Extract one service at a time. Prove it works. Then extract the next one.
+### Recommended Extraction Order for Grapeseed
 
----
-
-## 15. Decision Guide and Migration Path
-
-### Should You Break Out a Microservice?
-
-Ask these questions about the component you're considering:
-
-1. **Does a different team own this?** If yes → strong case for extraction
-2. **Does it scale differently from the rest?** If yes → moderate case
-3. **Does it deploy independently today?** If no → extraction adds value
-4. **Does it use a fundamentally different technology?** If yes → might justify extraction
-5. **Is it less than 6 months old?** If yes → wait. You don't fully understand it yet.
-
-### Recommended Migration Order for LinguaLearn
-
-| Phase | Services to Extract | Why |
-|-------|---------------------|-----|
-| Phase 1 | NotificationService | Fewest dependencies. Clean boundary. |
-| Phase 2 | VideoService | Different scaling profile. Potentially different tech. |
-| Phase 3 | ProgressService | Clear ownership by one team. |
-| Phase 4 | LessonService | High traffic. Team wants independent deployment. |
-| Phase 5 | IdentityService | Complex but worth it. Auth is foundational. |
-| Last | AnalyticsService | High effort. Do it when data team is established. |
+| Phase | Service | Reason to Extract |
+|-------|---------|------------------|
+| 1 | NotificationService | Stateless, fewest dependencies, easy to test independently |
+| 2 | VideoService | Very different scaling profile (CPU-intensive transcoding) |
+| 3 | AnalyticsService | SQL Server, different tech, different team |
+| 4 | ProgressService | High write volume on exam day — independent scaling valuable |
+| 5 | LessonService | High read volume — independent caching and read replica strategy |
+| 6 | SchoolService | Tenant management — foundational, extract carefully |
+| Last | IdentityService | Most critical, most complex, extract when team is experienced |
 
 ---
 
@@ -1118,67 +1127,54 @@ Ask these questions about the component you're considering:
 
 | Concept | One-Line Summary |
 |---------|-----------------|
-| Microservice | A small, independently deployable service owning one business domain |
-| Monolith | A single deployable unit. Start here. Migrate when there's a real reason. |
-| Bounded Context | A DDD concept that defines a natural service boundary |
-| API Gateway | The single entry point that routes, authenticates, and rate-limits all client requests |
-| Synchronous Communication | HTTP/gRPC calls where the caller waits for a response |
-| Asynchronous Communication | Event publishing where the caller doesn't wait for consumers |
-| Saga Pattern | Multi-step distributed process with compensating transactions on failure |
-| Distributed Tracing | Following a request's journey across multiple services via trace IDs |
-| Service Mesh | Infrastructure layer that manages service-to-service traffic transparently |
-| Strangler Fig | Safe pattern for migrating a monolith to microservices, one service at a time |
+| MediatR | In-process mediator: decouples controllers from business logic via typed messages |
+| Command | A MediatR request that changes state. One handler. Returns a result. |
+| Query | A MediatR request that reads data. One handler. Must not change state. |
+| Notification | A MediatR message broadcast to zero or more handlers (in-process fan-out) |
+| Pipeline Behavior | MediatR middleware: logging, tenant validation, FluentValidation, caching |
+| Bounded Context | The domain boundary that defines a natural microservice |
+| API Gateway | AWS-managed entry point: routing, JWT validation, rate limiting, WAF |
+| SQS | Point-to-point queue for async events between services |
+| SNS + SQS | Fan-out: one SNS topic → multiple SQS queues → multiple consumers |
+| Saga Pattern | Multi-step distributed transaction with compensating rollback on failure |
+| X-Ray | AWS distributed tracing — see the full request journey across all services |
+| Strangler Fig | Safe pattern: extract one service at a time, don't rewrite everything at once |
 
-### The Microservices Maturity Ladder
+### The MediatR Architecture Blueprint
+
+Every Grapeseed service follows this structure:
 
 ```
-Level 0: Monolith
-  └─► Build this first. Get your domain knowledge right.
-
-Level 1: Modular Monolith
-  └─► Clear modules, clean boundaries, shared DB.
-      Still one deployment. Much easier to understand.
-
-Level 2: Database-per-Feature (inside one deployment)
-  └─► Separate schemas or databases per module.
-      Enforce data ownership before splitting the app.
-
-Level 3: First Microservice Extracted
-  └─► One service extracted (usually Notifications).
-      Everything else still in the monolith.
-
-Level 4: Core Services Split
-  └─► 3-5 services. Teams own their services.
-      Event bus in place. API Gateway working.
-
-Level 5: Full Microservices + Platform Engineering
-  └─► Kubernetes, service mesh, distributed tracing,
-      self-service developer platform.
-      Requires 20+ engineers to operate sustainably.
+Controller → IMediator.Send(Command/Query)
+                  │
+          MediatR Pipeline:
+            LoggingBehavior
+            TenantValidationBehavior
+            ValidationBehavior (FluentValidation)
+            CachingBehavior (for ICachedQuery)
+                  │
+            CommandHandler → GrapeseekWriteDbContext (RDS Primary)
+            QueryHandler   → GrapeseekReadDbContext  (RDS Read Replica)
+                  │
+            Publish events → SQS/SNS (cross-service)
+            Publish notifications → IMediator.Publish() (in-process)
 ```
 
-### The Three Questions to Ask Before Adding a Service
-
-1. **What specific problem does extracting this solve?**
-2. **Is the team ready to operate another service (CI/CD, monitoring, on-call)?**
-3. **What are the tradeoffs, and are we willing to accept them?**
-
-If you can't answer all three clearly, keep it in the monolith for now.
+This is the pattern. Once you understand it, every Grapeseed service is instantly familiar — regardless of which team wrote it.
 
 ---
 
-*Congratulations on completing the System Architecture Mastery book! You have learned:*
+*Congratulations on completing the System Architecture Mastery book!*
 
-- *How distributed systems work and why they are challenging*
-- *How to serve hundreds of schools securely from one codebase with multi-tenancy*
-- *How to handle massive traffic spikes without going down*
-- *How to organize complex systems as collaborating microservices*
-
-*These are the skills that distinguish senior engineers from junior ones. The next step is to build something with them.*
+*You have learned:*
+- *How distributed systems work on AWS — and why they're challenging*
+- *How Grapeseed serves hundreds of schools securely with multi-tenancy and MediatR pipeline behaviors*
+- *How CloudFront, ElastiCache, ECS Auto Scaling, and SQS handle massive traffic spikes*
+- *How MediatR CQRS organizes service internals, and how microservices organize the overall system*
 
 *→ Return to [Book Index](./book_INDEX.md)*
 
 ---
 
-*Chapter 4 Complete · 16 sections · Microservices Architecture*
+*Chapter 4 Complete · 16 sections · Microservices & MediatR on AWS*
 *System Architecture Mastery — Complete*

@@ -1,47 +1,41 @@
 # Chapter 1: Distributed Systems
 
-> **Foundational Architecture · Core Theory · Production Patterns**
+> **Foundational Architecture · Core Theory · AWS Production Patterns**
 > *"A distributed system is one in which the failure of a computer you didn't even know existed can render your own computer unusable."*
-> — Leslie Lamport, Turing Award winner, inventor of distributed consensus
+> — Leslie Lamport, Turing Award winner
 
 ---
 
 ## Table of Contents
 
-1. [Introduction — Why One Computer Is Never Enough](#1-introduction)
+1. [Introduction — Why One Server Is Never Enough](#1-introduction)
 2. [What Is a Distributed System?](#2-what-is-a-distributed-system)
 3. [The 8 Fallacies of Distributed Computing](#3-the-8-fallacies)
 4. [The CAP Theorem — Choosing Your Tradeoffs](#4-cap-theorem)
 5. [Consistency Models — How "Fresh" Is Fresh Enough?](#5-consistency-models)
 6. [Fault Tolerance — Designing for Failure](#6-fault-tolerance)
-7. [The Circuit Breaker Pattern](#7-circuit-breaker)
-8. [Distributed Caching with Redis](#8-distributed-caching)
-9. [Service Discovery — Finding Each Other in the Network](#9-service-discovery)
-10. [The Education Platform Scenario](#10-education-platform-scenario)
+7. [The Circuit Breaker Pattern with Polly](#7-circuit-breaker)
+8. [Distributed Caching with Amazon ElastiCache (Redis)](#8-distributed-caching)
+9. [Service Discovery on AWS](#9-service-discovery)
+10. [The Grapeseed Scenario](#10-grapeseed-scenario)
 11. [Decision Guide — When to Go Distributed](#11-decision-guide)
 12. [Summary and Key Takeaways](#12-summary)
 
 ---
 
-## 1. Introduction — Why One Computer Is Never Enough
+## 1. Introduction — Why One Server Is Never Enough
 
 Let's start with a story.
 
-Imagine it's the first day of a new school year. LinguaLearn has just signed contracts with 500 schools across Southeast Asia. Ten thousand students log in simultaneously to access their first English lesson. Your backend runs on a single powerful server — a beefy machine with 64 CPU cores, 256 GB of RAM, and fast NVMe storage.
+Grapeseed has just signed partnership agreements with 200 schools across Southeast Asia. On the first Monday of the new school year, ten thousand students log into the platform simultaneously to access their first English lesson. Your backend runs on a single EC2 instance — even a powerful `m5.4xlarge` with 16 vCPUs and 64 GB of RAM.
 
-The server handles the first thousand users fine. At two thousand, response times start climbing. At five thousand, the CPU is pegged at 100%. At seven thousand, the database connection pool is exhausted and requests start failing. At ten thousand, the server runs out of memory and crashes. Every single student sees an error page. The school administrators are furious. Your phone is ringing.
+The server handles the first thousand users fine. At three thousand, CPU climbs to 80%. At six thousand, the RDS database connection pool is exhausted — new queries start failing with `Npgsql.NpgsqlException: The connection pool has been exhausted`. At eight thousand, the application server runs out of memory. At ten thousand, the EC2 instance becomes unresponsive. AWS health checks fail. ECS marks it as unhealthy. Every student sees an error page. Your Slack starts lighting up.
 
 **This is the fundamental problem that distributed systems solve.**
 
-No matter how powerful a single computer is, it has hard limits:
-- **CPU limit** — A CPU can only execute so many instructions per second
-- **Memory limit** — RAM is finite
-- **Network limit** — A single network card can only push so many bytes per second
-- **Storage I/O limit** — Even NVMe drives have maximum read/write throughput
+No matter how powerful a single computer is, it has hard physical limits — CPU cores, RAM, network bandwidth, disk I/O. When your user base grows beyond what one machine can handle, you need to spread the work across **multiple machines working together**. That collection of machines, coordinated to appear as a single system to end users, is a **distributed system**.
 
-When your user base grows beyond what one machine can handle, you need to spread the work across **multiple machines**. That collection of machines working together as if they were one system is a **distributed system**.
-
-The catch? The moment you add a second machine, you've introduced an entirely new category of problems that simply don't exist when you run everything on one computer. This chapter teaches you what those problems are, why they exist, and how experienced engineers deal with them.
+The catch? The moment you add a second machine, you have introduced a new category of problems that simply do not exist on a single server. This chapter teaches you what those problems are, why they exist, and how to solve them — using the Grapeseed stack on AWS.
 
 ---
 
@@ -49,435 +43,383 @@ The catch? The moment you add a second machine, you've introduced an entirely ne
 
 A **distributed system** is a group of independent computers that communicate over a network to accomplish a shared goal, and appear to end users as a single, unified system.
 
-The key phrase is *appear to end users as a single system*. When a student opens LinguaLearn and watches a video lesson, they don't know — and shouldn't care — that:
-- Their authentication was handled by a server in Singapore
-- The lesson metadata was fetched from a server in Tokyo
-- The video was streamed from a CDN node in Jakarta
-- Their progress was saved to a database cluster in Hong Kong
+When a student opens Grapeseed and starts a lesson, they don't know — and shouldn't care — that:
+- Their authentication was validated by an ECS task in `us-east-1`
+- The lesson metadata was fetched from a different ECS task reading an RDS PostgreSQL read replica
+- The lesson video was streamed from Amazon S3 via a CloudFront edge node in their country
+- Their progress was saved asynchronously via an SQS message
 
-From the student's perspective, they just opened the app and watched a lesson. The distributed system hides all that complexity.
+From the student's perspective, they just opened the app and started learning. The distributed system hides all that complexity.
 
 ### What Makes a System "Distributed"?
 
-According to the classic definition by Andrew Tanenbaum, a distributed system has three properties:
-
 1. **Multiple autonomous components** — Multiple independent machines, each with its own processor and memory
-2. **Communicate via network** — Components talk to each other only through messages over a network
+2. **Communicate via network** — Components talk through messages over a network
 3. **Single coherent system** — They present a unified interface to users
 
 ### Why Are Distributed Systems Hard?
 
-The difficulty comes from **uncertainty**. When you call a function on the same machine, you get an answer or an exception — there's no ambiguity. When you send a message to another machine over a network, any of these could happen:
+The difficulty comes from **uncertainty**. When you call a function locally, you get an answer or an exception. When you send a message to another machine over a network, any of these can happen:
 
-- The message arrives and the other machine processes it ✅
-- The message is lost in transit — the other machine never gets it ❌
-- The message arrives, but the other machine crashes before responding ❌
-- The other machine processes it AND sends a response, but the response is lost ❌
-- The other machine is very slow and your request times out — but the machine is still processing it ❌
+- The message arrives and is processed ✅
+- The message is lost in transit ❌
+- The message arrives, but the remote service crashes before responding ❌
+- The response is sent but lost on the way back to you ❌
+- The remote service is slow and your request times out — but it's still processing ❌
 
-In the last case, **you simply cannot know** whether the operation succeeded or not. This fundamental uncertainty is what makes distributed systems so intellectually challenging and why entire careers are built around understanding them.
+In the last case, **you simply cannot know** whether the operation succeeded. This fundamental uncertainty is what makes distributed systems so challenging.
 
 ---
 
 ## 3. The 8 Fallacies of Distributed Computing
 
-In the early 1990s, engineers at Sun Microsystems — having spent years building distributed software — compiled a list of assumptions that developers commonly (and wrongly) make. These became known as **The 8 Fallacies of Distributed Computing**.
-
-Understanding these fallacies will save you from some of the most painful and hard-to-debug production failures you'll ever encounter.
+Engineers at Sun Microsystems compiled a list of wrong assumptions developers commonly make when building distributed software. Understanding these will save you from the most painful production incidents.
 
 ---
 
 ### Fallacy 1: The Network Is Reliable
 
-**What developers think:** "I'll just make an HTTP call to fetch the lesson data. It'll work."
+**What developers think:** "I'll just make an HTTP call from LessonService to VideoService. It'll work."
 
-**Reality:** Networks fail. Cables get cut. Routers crash. Cloud providers have outages. Packets get dropped. Your call to the Lesson Service might fail 0.1% of the time — which sounds tiny until you're making 10,000 calls per minute, giving you 10 failures every minute.
+**Reality:** Networks fail. Even within AWS, availability zones can have connectivity issues. An HTTP call might fail 0.1% of the time — but at 10,000 calls per minute, that's 10 failures per minute.
 
-**What to do:** Always assume network calls can fail. Implement **retries with exponential backoff**, **timeouts**, and **fallback behavior**.
+**What to do:** Implement **retries with exponential backoff** (Polly), **timeouts**, and **fallback behavior**. Never assume a network call will succeed.
 
 ---
 
 ### Fallacy 2: Latency Is Zero
 
-**What developers think:** "The other service is in the same data center, so calling it is basically instant."
+**What developers think:** "Both services are in the same AWS region, so it's basically instant."
 
-**Reality:** Even in the same data center, a network call takes microseconds to milliseconds. Across data centers? Tens to hundreds of milliseconds. A call from London to Sydney? ~300ms of round-trip time just from physics (the speed of light). If your code makes 20 sequential service calls to render a page, and each takes 50ms, that's a full second of latency before any of your own code runs.
+**Reality:** Even within the same AWS region, a network hop takes 1-5ms. Cross-region calls (Singapore to US East) can take 150-200ms. If your code makes 15 sequential service calls to render a page, and each takes 10ms, that's 150ms of pure network overhead before any of your own logic runs.
 
-**What to do:** Minimize network round trips. Use **batching**, **caching**, and **parallel calls** where possible.
+**What to do:** Minimize round trips. Use **batching**, **parallel calls** (`Task.WhenAll`), and **caching**.
 
 ---
 
 ### Fallacy 3: Bandwidth Is Infinite
 
-**What developers think:** "I'll just return the full student object with all their lesson history every time."
+**What developers think:** "I'll return the complete student object with all lesson history every time."
 
-**Reality:** Network bandwidth costs money and has limits. Sending huge payloads repeatedly is slow and expensive. A student object with 5 years of lesson history might be 500KB. Sending that to 10,000 concurrent users is 5GB of data — per request cycle.
+**Reality:** AWS charges for data transfer between services (data egress). Sending large payloads repeatedly is slow and costly. A student object with 3 years of Grapeseed lesson history could be hundreds of kilobytes.
 
-**What to do:** Return only the data you need. Use pagination, field selection, and compression.
+**What to do:** Return only the data needed. Use **pagination** and **projection** (EF Core's `Select()` to return DTOs with only needed fields).
 
 ---
 
 ### Fallacy 4: The Network Is Secure
 
-**What developers think:** "The services are on a private internal network, so they're safe."
+**What developers think:** "Services communicate on a private VPC, so it's safe."
 
-**Reality:** Internal networks get compromised. Malicious actors can get inside your network. Configuration mistakes expose internal services. Even "private" traffic can be intercepted.
+**Reality:** Even internal AWS VPC traffic can be misconfigured or intercepted. IAM misconfigurations, security group mistakes, and insider threats are real.
 
-**What to do:** Use **mutual TLS (mTLS)** between services, authenticate service-to-service calls, and never trust a request just because it came from inside the network.
+**What to do:** Use **AWS VPC security groups** to limit which services can talk to which. Use **AWS IAM roles** for service authentication. Encrypt sensitive data even in transit within the VPC.
 
 ---
 
 ### Fallacy 5: Topology Doesn't Change
 
-**What developers think:** "I'll hardcode the IP address of the database server."
+**What developers think:** "I'll hardcode the RDS endpoint IP in the connection string."
 
-**Reality:** Servers get replaced. Services move between machines. IP addresses change during deployments, auto-scaling, and failures. In cloud environments, machines are ephemeral — they can be destroyed and recreated at any time with new IP addresses.
+**Reality:** ECS task IPs change on every deployment. RDS endpoints change during failovers. Auto-scaling creates and destroys instances constantly.
 
-**What to do:** Use **service discovery** and **DNS-based routing** instead of hardcoded IPs. (We cover this in Section 9.)
+**What to do:** Use **DNS-based discovery** — always reference services by name (e.g., `lesson-service.grapeseed.internal` or the RDS endpoint hostname, not its IP).
 
 ---
 
 ### Fallacy 6: There Is Only One Administrator
 
-**What developers think:** "We control the whole system, so we can coordinate changes easily."
+**What developers think:** "We control all the infrastructure, so we can coordinate changes easily."
 
-**Reality:** Large systems have multiple teams, multiple cloud regions, multiple infrastructure providers, and multiple deployment pipelines. The "admin" of the video streaming infrastructure might be a completely different team from the "admin" of the lesson database.
+**Reality:** At Grapeseed's scale, the lesson team, the video team, and the infrastructure team all have independent deployment pipelines. The AWS account might have multiple teams with different access levels.
 
-**What to do:** Design systems that can tolerate independent upgrades, partial deployments, and version mismatches.
+**What to do:** Design for independent deployments. Services must tolerate each other being on different versions simultaneously.
 
 ---
 
 ### Fallacy 7: Transport Cost Is Zero
 
-**What developers think:** "Data transfer between services is free."
+**What developers think:** "Network calls between AWS services in the same region are free."
 
-**Reality:** Cloud providers charge for data egress (traffic leaving a region or availability zone). Internal data center transfers use CPU for serialization and deserialization. Network infrastructure has costs.
+**Reality:** AWS charges for data transfer out of a region and between availability zones. Transferring large files between ECS tasks and S3 frequently adds up.
 
-**What to do:** Be mindful of what data crosses service boundaries and how often.
+**What to do:** Be intentional about what data crosses service and AZ boundaries. Cache aggressively to reduce repeated transfers.
 
 ---
 
 ### Fallacy 8: The Network Is Homogeneous
 
-**What developers think:** "All our services use the same tech stack and communicate the same way."
+**What developers think:** "All our services speak REST/JSON."
 
-**Reality:** Large organizations end up with a mix of technologies, protocols, and data formats. Your Lesson Service might use REST/JSON. Your Video Service might use gRPC/Protobuf. Your legacy system might speak SOAP. They all need to interoperate.
+**Reality:** Grapeseed likely integrates with school district systems (which might speak SOAP or have proprietary APIs), third-party video providers, and external authentication providers. They don't all speak the same language.
 
-**What to do:** Define clear **interface contracts** between services. Use an **API gateway** to handle protocol translation.
+**What to do:** Define clear interface contracts. Use the API Gateway to handle protocol translation and request normalization.
 
 ---
 
 ## 4. The CAP Theorem — Choosing Your Tradeoffs
 
-The **CAP Theorem**, proven by computer scientist Eric Brewer in 2000, is one of the most important theoretical results in distributed systems. It states:
+The **CAP Theorem**, proven by Eric Brewer in 2000, states:
 
 > **In a distributed system, you can guarantee at most two of the following three properties simultaneously:**
 > - **C**onsistency
 > - **A**vailability
 > - **P**artition tolerance
 
-Let's understand each one using our education platform.
+### The Three Properties — Grapeseed Context
 
-### Consistency (C)
+**Consistency (C):** Every read receives the most recent write, or an error. All nodes see the same data simultaneously.
 
-**Definition:** Every read receives the most recent write, or an error. All nodes in the system see the same data at the same time.
+*Grapeseed example:* A teacher marks a student's Unit 3 quiz as complete. A consistent system ensures the next time anyone queries that student's progress — on any server — they see "Unit 3: Complete."
 
-**Education Example:** A teacher marks a student's quiz as "passed." In a consistent system, the very next second when that student checks their progress dashboard, they will see "passed" — regardless of which server handles their request.
+**Availability (A):** Every request receives a response (not necessarily the most recent data). The system never errors just because it's busy.
 
-### Availability (A)
+*Grapeseed example:* Even if one RDS replica is being restored from a snapshot, students can still log in and access lessons — they might see slightly stale progress data, but they get a response.
 
-**Definition:** Every request receives a response (not necessarily the most recent data), but the system never returns an error just because it's overwhelmed or a node is down.
+**Partition Tolerance (P):** The system keeps functioning even when some machines can't communicate with others.
 
-**Education Example:** Even if one of your database servers is down for maintenance, students can still log in and access lessons. They might see slightly old data (e.g., a quiz score from an hour ago), but they get *some* response.
+*Grapeseed example:* If AWS's network inside a region has a partial failure and some ECS tasks can't reach others, the platform still serves users.
 
-### Partition Tolerance (P)
+### The Cruel Truth
 
-**Definition:** The system continues to function even when network partitions occur — that is, when some machines can't communicate with others because a network link broke.
-
-**Education Example:** Your Singapore and Tokyo servers can't reach each other because an undersea cable was damaged. Students in Singapore can still use the platform. Students in Tokyo can still use the platform. The two halves operate independently.
-
-### The Cruel Tradeoff
-
-Here's the uncomfortable truth: **Network partitions happen. You cannot prevent them.** Therefore, Partition Tolerance is not optional for any real distributed system — you must have P.
-
-That leaves you choosing between **C and A**:
+**Network partitions happen — you cannot prevent them.** Partition Tolerance is not optional for any real distributed system. This leaves you choosing between C and A:
 
 ```
-┌────────────────────────────────────────────────────────┐
-│                   CAP Theorem Choices                   │
-│                                                         │
-│   Since P is required, your real choice is:            │
-│                                                         │
-│   CP — Consistent + Partition Tolerant                 │
-│   When a partition occurs, some nodes will refuse      │
-│   requests to avoid returning stale data.              │
-│   → Use for: financial transactions, payment records   │
-│   → Example: MongoDB, HBase, Apache ZooKeeper         │
-│                                                         │
-│   AP — Available + Partition Tolerant                  │
-│   When a partition occurs, nodes keep serving          │
-│   requests, but some might return stale data.          │
-│   → Use for: lesson content, video metadata, profiles  │
-│   → Example: Cassandra, CouchDB, DynamoDB             │
-└────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                   Your Real CAP Choice                         │
+│                                                               │
+│  CP — Consistent + Partition Tolerant                        │
+│  When a partition occurs, some nodes refuse requests         │
+│  to prevent returning stale data.                            │
+│  → Use for: payment processing, official grades              │
+│  → AWS services: RDS Multi-AZ (strong consistency)           │
+│                                                               │
+│  AP — Available + Partition Tolerant                         │
+│  When a partition occurs, nodes keep serving requests        │
+│  but may return briefly stale data.                          │
+│  → Use for: lesson content, video metadata, profiles         │
+│  → AWS services: DynamoDB (eventual consistency mode),       │
+│    ElastiCache Redis, RDS Read Replicas                      │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-### Applying CAP to LinguaLearn
-
-Different parts of our system have different requirements:
+### Applying CAP to Grapeseed
 
 | Data | Choose | Why |
 |------|--------|-----|
-| Student payment records | **CP** | A double-charge is catastrophic. Stale data = wrong billing. |
-| Teacher-assigned grades | **CP** | A student's official grade must be accurate. |
-| Lesson content (text, videos) | **AP** | If a lesson was updated 5 minutes ago and a student sees the old version briefly, that's acceptable. |
-| Student progress (lessons watched) | **AP** | Approximate is fine. A 30-second delay in progress sync is invisible to users. |
-| Live class session state | **CP** | In a live class, everyone must see the same state. |
+| Student payment / subscription records | **CP** | A billing error is catastrophic |
+| Official end-of-unit assessment grades | **CP** | Must be accurate for school records |
+| Lesson content (text, media references) | **AP** | Stale by 1 hour is fine for a lesson page |
+| "Currently watching" video progress | **AP** | Approximate is fine; sync every 30 seconds |
+| Live class session state | **CP** | Everyone in the class must see the same state |
+| Leaderboards / engagement stats | **AP** | A 5-minute lag is invisible to users |
 
-> **Key Insight:** You don't choose one CAP mode for your entire application. Different features can — and should — use different databases and consistency models based on their specific requirements.
+> **Key Insight:** You don't pick one CAP mode for the whole application. Different features use different AWS services and consistency settings based on their specific requirements.
 
 ---
 
 ## 5. Consistency Models — How "Fresh" Is Fresh Enough?
 
-CAP introduced two extremes: strong consistency vs. availability during partitions. In practice, there's a rich spectrum of consistency models between those two poles.
-
 ### Strong Consistency
 
-After a write completes, all subsequent reads — from any node in the cluster — return that new value.
+After a write, all subsequent reads from any node return the new value immediately.
 
 ```
-Write: lesson.title = "Past Perfect Tense" → Server A
-Read from Server B → "Past Perfect Tense" ✅ (immediately)
-Read from Server C → "Past Perfect Tense" ✅ (immediately)
+Write: lesson.title = "Unit 4: Comparatives" → RDS Primary
+Read from RDS Read Replica → "Unit 4: Comparatives" ✅ (blocked until replica syncs)
 ```
 
-**Cost:** To achieve this, nodes must coordinate before responding. This adds latency and means during a network partition, some nodes must refuse requests.
+**Cost:** Coordinating across nodes adds latency and reduces availability during partitions. Use for financial records and official grades.
 
 ### Eventual Consistency
 
-After a write, the new value will *eventually* propagate to all nodes, but there's no guarantee of when. For a short window, different nodes might return different values.
+After a write, the new value will propagate to all nodes eventually, but not instantly.
 
 ```
-Write: student.lastLesson = "Unit 5"  → Server A (Singapore)
-Read from Server B (Tokyo, 100ms later) → "Unit 4"  (not yet propagated)
-Read from Server B (2 seconds later)  → "Unit 5"  ✅ (now propagated)
+Write: student.lastLesson = "Unit 3" → RDS Primary (Singapore)
+Read from Read Replica (10ms later)  → "Unit 2"  (not yet propagated)
+Read from Read Replica (1 second later) → "Unit 3" ✅ (now propagated)
 ```
 
-**Benefit:** Much higher availability and lower latency. Writes don't need global coordination.
+**Benefit:** Much higher availability and lower latency. Writes don't block on global coordination.
 
-**Challenge:** Your application code must be written to tolerate brief inconsistencies. This is called being **eventually consistent-aware**.
+**When good enough:** For Grapeseed, lesson content, video watch history, and progress dashboards can tolerate a few seconds of lag. Students don't notice if their "last watched" indicator is 2 seconds behind.
 
-### Read-Your-Writes Consistency (Session Consistency)
+### Read-Your-Writes Consistency
 
-A weaker but very practical model: after a user writes data, that same user always reads their own latest write. Other users might still see old data temporarily.
+After a user writes data, **that same user** always reads their own latest write. Other users might still see old data briefly.
 
 ```
-Student A submits quiz answers → saved
-Student A immediately checks their grade → sees their submission ✅
-Student B checks Student A's grade → might see "pending" for a few seconds ✅ (acceptable)
+Student submits a quiz → saved to RDS Primary
+Student immediately clicks "My Results" → sees their submission ✅
+Teacher views student results → might see "pending" for 1-2 seconds ✅ (acceptable)
 ```
 
-This is the sweet spot for many features in our education platform: students should always see their own actions reflected immediately, but data propagating to other users or dashboards can have a short delay.
+This is the sweet spot for most Grapeseed features. Achieved by routing a user's reads to the primary immediately after a write, then returning to read replicas after a short window.
 
 ---
 
 ## 6. Fault Tolerance — Designing for Failure
 
-Here is the mindset shift every distributed systems engineer must make:
-
 > **Stop asking: "How do I prevent failures?"**
-> **Start asking: "How do I make my system survive failures?"**
+> **Start asking: "How does Grapeseed keep running when failures happen?"**
 
-Failures are not exceptional events in distributed systems — they are the norm. In a cluster of 1,000 machines, if each machine has a 0.1% chance of failing per day, you should expect **one machine failure per day**. Your system must keep running.
+On AWS, hardware failures are expected. AWS itself publishes incident reports for every outage. Your system must be designed to survive them.
 
-### The Four Strategies of Fault Tolerance
+### 1. Redundancy — Multi-AZ Deployment
 
-#### 1. Redundancy — "Don't Have a Single Point of Failure"
-
-Run multiple instances of every component. If one dies, the others keep working.
+Never run a single instance of anything critical. On AWS, use **multiple Availability Zones**:
 
 ```
-Without Redundancy:         With Redundancy:
-                           
-  [Student] ──► [Server]     [Student] ──► [Server 1]
-                   ↓                       [Server 2]  ← Load Balancer
-                 CRASH                     [Server 3]
-                   ↓
-              EVERYTHING STOPS
+AWS Region: ap-southeast-1 (Singapore)
+  ├── AZ: ap-southeast-1a
+  │     ├── ECS Task: LessonService (instance 1)
+  │     └── RDS PostgreSQL: Primary
+  │
+  ├── AZ: ap-southeast-1b
+  │     ├── ECS Task: LessonService (instance 2)
+  │     └── RDS PostgreSQL: Standby (auto-failover)
+  │
+  └── AZ: ap-southeast-1c
+        └── ECS Task: LessonService (instance 3)
+
+ALB routes requests across all 3 AZs.
+If AZ 1a fails entirely, ALB stops sending traffic there.
+RDS automatically promotes the standby to primary (~30 seconds).
+Students might see a brief error, but service recovers automatically.
 ```
 
-#### 2. Replication — "Keep Copies of Your Data"
+### 2. RDS Multi-AZ — Automatic Database Failover
 
-Store the same data on multiple database nodes. If one database server fails, another has all the data.
-
-```
-Write to Primary DB
-        ↓ (async replication)
-    Replica 1  ←  Read traffic
-    Replica 2  ←  Read traffic
-    Replica 3  ←  Failover candidate
-```
-
-#### 3. Retry with Backoff — "Try Again, But Politely"
-
-If a call fails, try again. But don't retry instantly in a tight loop — that can overwhelm a struggling service.
+When you enable Multi-AZ on RDS, AWS maintains a synchronous standby replica in a different AZ. If the primary fails, RDS automatically promotes the standby. The connection string (endpoint) remains the same — your application reconnects automatically.
 
 ```
-Attempt 1: Failed → wait 1 second
-Attempt 2: Failed → wait 2 seconds  
-Attempt 3: Failed → wait 4 seconds
-Attempt 4: Failed → wait 8 seconds
-Attempt 5: Failed → give up, return error to user
+Connection String: grapeseed-db.cluster-xxxx.ap-southeast-1.rds.amazonaws.com
+   (This DNS always points to the current primary — AWS updates it during failover)
 ```
 
-This is called **exponential backoff with jitter**. The jitter (a small random addition to each wait time) prevents all clients from retrying simultaneously, which would create a thundering herd that overwhelms the recovering service.
+### 3. Retry with Exponential Backoff
 
-#### 4. Graceful Degradation — "Do Less, Not Nothing"
+If a call fails, try again — but politely. An immediate retry can overwhelm a recovering service.
 
-When a dependency fails, serve a degraded but still-useful response instead of failing completely.
+```
+Attempt 1: Failed → wait 1s + small random jitter
+Attempt 2: Failed → wait 2s + jitter
+Attempt 3: Failed → wait 4s + jitter
+Attempt 4: Give up, return graceful error to user
+```
 
-**Example:** The Recommendation Service (which suggests which lesson to study next) goes down. Instead of showing an error page, the Lesson Service falls back to showing a generic "Continue where you left off" button with the student's last lesson. The experience is degraded, but the student can still study.
+The **jitter** (random milliseconds added to each wait) prevents all clients from retrying at exactly the same moment, which would create a thundering herd that overwhelms the recovering service.
+
+### 4. Graceful Degradation
+
+When a dependency fails, serve a degraded but still-useful response.
+
+**Grapeseed Example:** The Recommendation Engine (suggests the next lesson) goes down. Instead of showing an error page, the Lesson Service falls back to: "Continue where you left off → Unit 3, Lesson 2." The experience is slightly worse, but the student can still study.
 
 ---
 
-## 7. The Circuit Breaker Pattern
+## 7. The Circuit Breaker Pattern with Polly
 
-The circuit breaker is one of the most important patterns in distributed systems. It prevents **cascading failures** — a situation where one failing service brings down all the services that depend on it.
+The circuit breaker prevents **cascading failures** — when one failing service drags all services that depend on it down with it.
 
 ### The Problem Without Circuit Breakers
 
-Imagine LinguaLearn's Lesson Service needs to call the Video Service to get video metadata. The Video Service suddenly starts responding very slowly (taking 30 seconds per request) because its database is struggling.
+LessonService calls VideoService to get video metadata. VideoService's RDS database is running a long migration and is very slow (30 seconds per query). Without a circuit breaker:
 
-Without a circuit breaker:
-1. Lesson Service makes a request to Video Service
-2. The thread waits... and waits... for 30 seconds
-3. Meanwhile, more student requests come in
-4. Each request spawns a thread that's now stuck waiting on Video Service
-5. After thousands of requests, all threads in the Lesson Service are occupied waiting
-6. The Lesson Service itself stops responding
-7. The API Gateway starts timing out on Lesson Service calls
-8. Now the entire platform appears down — even though only the Video Service had issues
+1. LessonService threads wait 30 seconds for VideoService to respond
+2. More student requests arrive, spawning more waiting threads
+3. LessonService runs out of threads — it stops responding entirely
+4. The ALB health check fails on LessonService
+5. Now both services appear down, even though only VideoService had an issue
 
-This is called a **cascading failure**, and it's one of the most common causes of large-scale outages.
+This is a **cascading failure**. The circuit breaker prevents it by detecting the failing pattern and stopping calls fast.
 
-### How the Circuit Breaker Works
-
-The circuit breaker is modeled on an electrical circuit breaker. It has three states:
+### Circuit Breaker States
 
 ```
-   ┌──────────────────────────────────────────────────────────────┐
-   │                   Circuit Breaker States                      │
-   │                                                               │
-   │   CLOSED (Normal)          OPEN (Failing)                    │
-   │   ─────────────            ─────────────                     │
-   │   Requests flow            Requests fail immediately         │
-   │   normally. Failures       (no waiting, no hanging threads)  │
-   │   are counted.             After a timeout, moves to...      │
-   │                                         ↓                    │
-   │                         HALF-OPEN (Testing)                  │
-   │                         ─────────────────                    │
-   │                         Allow one request through.           │
-   │                         If it succeeds → back to CLOSED      │
-   │                         If it fails    → back to OPEN        │
-   └──────────────────────────────────────────────────────────────┘
-   
-   CLOSED ──(5+ failures in 10 sec)──► OPEN
-   OPEN   ──(after 30 seconds)──────► HALF-OPEN
-   HALF-OPEN ──(success)────────────► CLOSED
-   HALF-OPEN ──(failure)────────────► OPEN
+CLOSED (Normal) ──(5 failures in 10 seconds)──► OPEN (Failing)
+                                                       │
+                                          (wait 30 seconds)
+                                                       │
+                                                       ▼
+                                              HALF-OPEN (Testing)
+                                              Allow 1 request through
+                                              Success → CLOSED
+                                              Failure → OPEN
 ```
 
-### Implementing a Circuit Breaker in C# with Polly
-
-[Polly](https://github.com/App-vNext/Polly) is the standard library for resilience and transient fault handling in .NET. It makes circuit breakers, retries, and timeouts easy to implement.
+### Implementation with Polly
 
 ```csharp
-// Install: dotnet add package Polly
+// ─────────────────────────────────────────────────────────────────
+// Program.cs — Registering Polly resilience on HttpClient
 // Install: dotnet add package Microsoft.Extensions.Http.Polly
-
 // ─────────────────────────────────────────────────────────────────
-// Program.cs — Registering resilience policies
-// ─────────────────────────────────────────────────────────────────
-using Polly;
-using Polly.Extensions.Http;
-
-var builder = WebApplication.CreateBuilder(args);
-
-// Register the VideoServiceClient with HttpClient + Polly policies
 builder.Services.AddHttpClient<IVideoServiceClient, VideoServiceClient>(client =>
 {
-    client.BaseAddress = new Uri("https://video-service.lingualearn.internal");
-    client.Timeout = TimeSpan.FromSeconds(10); // Never wait more than 10 seconds
+    // Use the ECS Service Connect DNS name, not a hardcoded IP
+    client.BaseAddress = new Uri(builder.Configuration["ServiceUrls:VideoService"]);
+    client.Timeout = TimeSpan.FromSeconds(10);
 })
-.AddPolicyHandler(GetRetryPolicy())
-.AddPolicyHandler(GetCircuitBreakerPolicy());
+.AddPolicyHandler(ResiliencePolicies.GetRetryPolicy())
+.AddPolicyHandler(ResiliencePolicies.GetCircuitBreakerPolicy());
 
 // ─────────────────────────────────────────────────────────────────
-// Retry Policy: Try up to 3 times with exponential backoff + jitter
+// ResiliencePolicies.cs — Reusable Polly policies for Grapeseed
 // ─────────────────────────────────────────────────────────────────
-static IAsyncPolicy<HttpResponseMessage> GetRetryPolicy()
+public static class ResiliencePolicies
 {
-    var jitter = new Random();
-    
-    return HttpPolicyExtensions
-        .HandleTransientHttpError()  // Handles 5xx errors and network exceptions
-        .WaitAndRetryAsync(
-            retryCount: 3,
-            sleepDurationProvider: retryAttempt =>
-            {
-                // Exponential backoff: 1s, 2s, 4s — plus a small random jitter
-                var exponentialWait = TimeSpan.FromSeconds(Math.Pow(2, retryAttempt));
-                var jitterAmount = TimeSpan.FromMilliseconds(jitter.Next(0, 300));
-                return exponentialWait + jitterAmount;
-            },
-            onRetry: (outcome, timespan, retryAttempt, context) =>
-            {
-                // Log each retry attempt for observability
-                Console.WriteLine($"[Retry] Attempt {retryAttempt} after {timespan.TotalSeconds:F1}s " +
-                                  $"due to: {outcome.Exception?.Message ?? outcome.Result.StatusCode.ToString()}");
-            }
-        );
-}
+    private static readonly Random _jitter = new();
 
-// ─────────────────────────────────────────────────────────────────
-// Circuit Breaker Policy
-// Opens after 5 failures in 10 seconds; stays open for 30 seconds
-// ─────────────────────────────────────────────────────────────────
-static IAsyncPolicy<HttpResponseMessage> GetCircuitBreakerPolicy()
-{
-    return HttpPolicyExtensions
-        .HandleTransientHttpError()
-        .CircuitBreakerAsync(
-            handledEventsAllowedBeforeBreaking: 5,   // Open after 5 failures
-            durationOfBreak: TimeSpan.FromSeconds(30), // Stay open for 30 seconds
-            onBreak: (outcome, breakDelay) =>
-            {
-                // Alert your monitoring system when the circuit opens!
-                Console.WriteLine($"[Circuit Breaker] OPENED for {breakDelay.TotalSeconds}s " +
-                                  $"due to: {outcome.Exception?.Message ?? outcome.Result.StatusCode.ToString()}");
-            },
-            onReset: () =>
-            {
-                Console.WriteLine("[Circuit Breaker] CLOSED — service recovered.");
-            },
-            onHalfOpen: () =>
-            {
-                Console.WriteLine("[Circuit Breaker] HALF-OPEN — testing recovery...");
-            }
-        );
+    /// <summary>
+    /// Retry up to 3 times with exponential backoff + jitter.
+    /// Handles 5xx errors and network exceptions.
+    /// </summary>
+    public static IAsyncPolicy<HttpResponseMessage> GetRetryPolicy() =>
+        HttpPolicyExtensions
+            .HandleTransientHttpError()
+            .WaitAndRetryAsync(
+                retryCount: 3,
+                sleepDurationProvider: attempt =>
+                {
+                    var exponential = TimeSpan.FromSeconds(Math.Pow(2, attempt));  // 2s, 4s, 8s
+                    var jitter = TimeSpan.FromMilliseconds(_jitter.Next(0, 300)); // ±300ms jitter
+                    return exponential + jitter;
+                },
+                onRetry: (outcome, delay, attempt, _) =>
+                {
+                    var reason = outcome.Exception?.Message ?? outcome.Result.StatusCode.ToString();
+                    Console.WriteLine($"[Polly Retry] Attempt {attempt} after {delay.TotalSeconds:F1}s. Reason: {reason}");
+                }
+            );
+
+    /// <summary>
+    /// Open circuit after 5 failures within 10 seconds.
+    /// Stay open for 30 seconds before testing recovery.
+    /// </summary>
+    public static IAsyncPolicy<HttpResponseMessage> GetCircuitBreakerPolicy() =>
+        HttpPolicyExtensions
+            .HandleTransientHttpError()
+            .CircuitBreakerAsync(
+                handledEventsAllowedBeforeBreaking: 5,
+                durationOfBreak: TimeSpan.FromSeconds(30),
+                onBreak: (outcome, delay) =>
+                {
+                    var reason = outcome.Exception?.Message ?? outcome.Result.StatusCode.ToString();
+                    Console.WriteLine($"[Circuit Breaker] OPEN for {delay.TotalSeconds}s. Reason: {reason}");
+                    // TODO: Publish a CloudWatch metric alarm here
+                },
+                onReset: () => Console.WriteLine("[Circuit Breaker] CLOSED — service recovered."),
+                onHalfOpen: () => Console.WriteLine("[Circuit Breaker] HALF-OPEN — testing recovery...")
+            );
 }
 ```
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// VideoServiceClient.cs — Client that uses the configured policies
+// VideoServiceClient.cs — Uses the registered Polly policies
 // ─────────────────────────────────────────────────────────────────
-public interface IVideoServiceClient
-{
-    Task<VideoMetadata?> GetVideoMetadataAsync(string videoId);
-}
-
 public class VideoServiceClient : IVideoServiceClient
 {
     private readonly HttpClient _httpClient;
@@ -493,88 +435,75 @@ public class VideoServiceClient : IVideoServiceClient
     {
         try
         {
-            // This call automatically uses the retry + circuit breaker policies
-            // registered in Program.cs via AddPolicyHandler()
+            // Polly policies registered in Program.cs automatically apply here
             var response = await _httpClient.GetAsync($"/api/videos/{videoId}/metadata");
             response.EnsureSuccessStatusCode();
-
             return await response.Content.ReadFromJsonAsync<VideoMetadata>();
         }
-        catch (BrokenCircuitException)
+        catch (BrokenCircuitException ex)
         {
-            // The circuit is open — Video Service is known to be down
-            // Return a fallback immediately instead of waiting
-            _logger.LogWarning("Circuit is OPEN for VideoService. Returning fallback metadata.");
-            return GetFallbackMetadata(videoId);
+            // Circuit is OPEN — Video Service is known to be failing
+            // Return fallback data immediately, no waiting
+            _logger.LogWarning(ex, "Circuit OPEN for VideoService. Returning fallback for {VideoId}", videoId);
+            return CreateFallbackMetadata(videoId);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to fetch video metadata for {VideoId} after all retries", videoId);
+            _logger.LogError(ex, "Failed to get video metadata for {VideoId} after all retries", videoId);
             return null;
         }
     }
 
-    // Graceful degradation: return minimal data when the service is unavailable
-    private VideoMetadata GetFallbackMetadata(string videoId)
+    /// <summary>
+    /// Graceful degradation: return minimal metadata so the lesson page
+    /// can still render with a "video temporarily unavailable" indicator.
+    /// </summary>
+    private static VideoMetadata CreateFallbackMetadata(string videoId) => new()
     {
-        return new VideoMetadata
-        {
-            VideoId = videoId,
-            Title = "Video Lesson",        // Generic title
-            DurationSeconds = 0,           // Unknown duration
-            IsAvailable = false,           // Signal to the UI to show a "temporarily unavailable" message
-            FallbackUsed = true
-        };
-    }
+        VideoId = videoId,
+        Title = "Lesson Video",
+        IsAvailable = false,         // Signal to UI: show "temporarily unavailable"
+        FallbackUsed = true
+    };
 }
 ```
 
-The beauty of this pattern is that **the Lesson Service stays healthy even when the Video Service goes down**. Instead of hanging threads consuming all resources, failing requests fail fast (in microseconds, once the circuit is open), and the rest of the application continues to work normally.
-
 ---
 
-## 8. Distributed Caching with Redis
+## 8. Distributed Caching with Amazon ElastiCache for Redis
 
-A **cache** is a fast, temporary data store that sits in front of a slower, authoritative data store. By serving frequently-requested data from the cache, you can dramatically reduce load on your database and improve response times.
+### Why In-Memory Cache Isn't Enough
 
-In a single-server application, you might use an in-memory cache (like `IMemoryCache` in .NET). But in a distributed system with multiple application servers, you need a **distributed cache** — a cache that is shared across all your servers.
+When ECS scales LessonService to 10 task instances, each instance has its own in-memory cache. The same lesson data gets loaded 10 times from RDS — once per instance. Cache invalidation becomes chaos: invalidate the lesson cache on Instance 1, but Instances 2-10 still serve stale data.
 
-**Redis** (Remote Dictionary Server) is the industry-standard distributed cache. It stores data in memory (making it extremely fast), supports rich data structures, and can be replicated for high availability.
-
-### Why In-Memory Cache Isn't Enough in a Distributed System
+**Amazon ElastiCache for Redis** is a fully managed Redis cluster that all ECS instances share. Invalidate once — all instances see it.
 
 ```
-                    WITHOUT Distributed Cache
-                    
-   Request → Server 1 → Cache MISS → DB → fills Server1 cache → returns data
-   Request → Server 2 → Cache MISS → DB → fills Server2 cache → returns data
-   Request → Server 3 → Cache MISS → DB → fills Server3 cache → returns data
-   
-   Problem: Every server has its own cache. The same data is loaded from DB
-   multiple times. Cache invalidation must happen on every server separately.
-   
-                    WITH Distributed Cache (Redis)
-                    
-   Request → Server 1 → Cache MISS → DB → fills Redis → returns data
-   Request → Server 2 → Cache HIT from Redis → returns data immediately ✅
-   Request → Server 3 → Cache HIT from Redis → returns data immediately ✅
-   
-   One shared cache for all servers. Invalidate once, all servers see it.
+Without ElastiCache:
+  Student hits Instance 1 → Cache MISS → RDS query → fills Instance 1 cache
+  Student hits Instance 2 → Cache MISS → RDS query → fills Instance 2 cache  (wasted!)
+  Teacher updates a lesson → invalidates Instance 1 cache only
+  Student hits Instance 2 → reads stale data  ❌
+
+With ElastiCache:
+  Student hits Instance 1 → Cache MISS → RDS query → fills ElastiCache
+  Student hits Instance 2 → Cache HIT from ElastiCache → served in ~1ms ✅
+  Teacher updates a lesson → invalidate ElastiCache key → all instances see it ✅
 ```
 
-### Implementing Distributed Cache in C#
+### Setting Up ElastiCache in C#
 
 ```csharp
-// Install: dotnet add package Microsoft.Extensions.Caching.StackExchangeRedis
-
 // ─────────────────────────────────────────────────────────────────
-// Program.cs — Register Redis distributed cache
+// Program.cs — Register Amazon ElastiCache (Redis) via IDistributedCache
+// Install: dotnet add package Microsoft.Extensions.Caching.StackExchangeRedis
 // ─────────────────────────────────────────────────────────────────
 builder.Services.AddStackExchangeRedisCache(options =>
 {
-    options.Configuration = builder.Configuration.GetConnectionString("Redis");
-    // e.g., "redis-cluster.lingualearn.internal:6379,password=secret,ssl=true"
-    options.InstanceName = "LinguaLearn:"; // Namespace prefix for all keys
+    // ElastiCache Cluster endpoint from AWS Secrets Manager / SSM Parameter Store
+    options.Configuration = builder.Configuration["AWS:ElastiCache:Endpoint"];
+    // e.g., "grapeseed-cache.abc123.cache.amazonaws.com:6379,ssl=true"
+    options.InstanceName = "Grapeseed:"; // Namespace prefix for all cache keys
 });
 
 builder.Services.AddScoped<ILessonCacheService, LessonCacheService>();
@@ -582,29 +511,20 @@ builder.Services.AddScoped<ILessonCacheService, LessonCacheService>();
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// LessonCacheService.cs — Cache-Aside pattern for lesson data
+// LessonCacheService.cs — Cache-Aside pattern for Grapeseed lessons
+// The Cache-Aside pattern:
+//   1. Check ElastiCache first
+//   2. Cache HIT → return cached data (no DB call)
+//   3. Cache MISS → load from RDS → store in ElastiCache → return
 // ─────────────────────────────────────────────────────────────────
-// The Cache-Aside pattern (also called Lazy Loading) is the most
-// common caching pattern:
-//   1. Check the cache first
-//   2. If hit: return cached data
-//   3. If miss: load from DB, store in cache, return data
-// ─────────────────────────────────────────────────────────────────
-
-public interface ILessonCacheService
-{
-    Task<Lesson?> GetLessonAsync(int lessonId);
-    Task InvalidateLessonAsync(int lessonId);
-}
-
 public class LessonCacheService : ILessonCacheService
 {
     private readonly IDistributedCache _cache;
     private readonly ILessonRepository _repository;
     private readonly ILogger<LessonCacheService> _logger;
 
-    // How long should we cache a lesson before refreshing from the DB?
-    // Lesson content changes rarely, so 1 hour is a reasonable TTL.
+    // Grapeseed lesson content changes rarely — 1 hour TTL is appropriate.
+    // If a teacher edits a lesson, we explicitly invalidate the key.
     private static readonly TimeSpan LessonCacheTtl = TimeSpan.FromHours(1);
 
     public LessonCacheService(
@@ -621,23 +541,20 @@ public class LessonCacheService : ILessonCacheService
     {
         var cacheKey = $"lesson:{lessonId}";
 
-        // Step 1: Try to get from cache
+        // Step 1: Try ElastiCache
         var cachedJson = await _cache.GetStringAsync(cacheKey);
-
         if (cachedJson is not null)
         {
-            // Cache HIT: deserialize and return. No DB call needed.
-            _logger.LogDebug("Cache HIT for lesson {LessonId}", lessonId);
+            _logger.LogDebug("ElastiCache HIT for lesson {LessonId}", lessonId);
             return JsonSerializer.Deserialize<Lesson>(cachedJson);
         }
 
-        // Step 2: Cache MISS — load from the database
-        _logger.LogDebug("Cache MISS for lesson {LessonId}. Loading from DB...", lessonId);
+        // Step 2: Cache miss — query RDS PostgreSQL
+        _logger.LogDebug("ElastiCache MISS for lesson {LessonId}. Querying RDS...", lessonId);
         var lesson = await _repository.GetByIdAsync(lessonId);
-
         if (lesson is null) return null;
 
-        // Step 3: Store in cache for future requests
+        // Step 3: Store in ElastiCache for future requests
         var json = JsonSerializer.Serialize(lesson);
         await _cache.SetStringAsync(cacheKey, json, new DistributedCacheEntryOptions
         {
@@ -649,154 +566,144 @@ public class LessonCacheService : ILessonCacheService
 
     public async Task InvalidateLessonAsync(int lessonId)
     {
-        // When a teacher updates a lesson, we must remove the cached version
-        // so the next request will load the fresh data from the DB.
-        var cacheKey = $"lesson:{lessonId}";
-        await _cache.RemoveAsync(cacheKey);
-        _logger.LogInformation("Cache invalidated for lesson {LessonId}", lessonId);
+        // Called when a teacher saves edits to a lesson
+        await _cache.RemoveAsync($"lesson:{lessonId}");
+        _logger.LogInformation("ElastiCache key invalidated for lesson {LessonId}", lessonId);
     }
+}
+```
+
+### Reading Configuration Securely from AWS
+
+In production, never put secrets in `appsettings.json`. Use **AWS Secrets Manager** or **SSM Parameter Store**:
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Program.cs — Load configuration from AWS Secrets Manager
+// Install: dotnet add package AWSSDK.SecretsManager
+//          dotnet add package Kralizek.Extensions.Configuration.AWSSecretsManager
+// ─────────────────────────────────────────────────────────────────
+builder.Configuration.AddSecretsManager(region: RegionEndpoint.APSoutheast1, configurator: options =>
+{
+    // Load only secrets with the "grapeseed/" prefix
+    options.SecretFilter = entry => entry.Name.StartsWith("grapeseed/lesson-service/");
+    options.KeyGenerator = (entry, key) =>
+        // Transform "grapeseed/lesson-service/RdsConnectionString"
+        // into "ConnectionStrings:RdsConnectionString" (appsettings format)
+        key.Replace("grapeseed/lesson-service/", "").Replace("/", ":");
+});
+```
+
+---
+
+## 9. Service Discovery on AWS
+
+In ECS (Elastic Container Service), tasks get ephemeral IP addresses that change on every deployment. You cannot hardcode them. AWS provides several discovery mechanisms:
+
+### ECS Service Connect (Recommended for Grapeseed)
+
+ECS Service Connect registers each service under a DNS name within a namespace. Services call each other by name, and ECS handles routing:
+
+```yaml
+# ecs-task-definition.json excerpt
+"serviceConnectConfiguration": {
+  "enabled": true,
+  "namespace": "grapeseed.internal",
+  "services": [
+    {
+      "portName": "lesson-service-port",
+      "discoveryName": "lesson-service",
+      "clientAliases": [{ "port": 8080, "dnsName": "lesson-service" }]
+    }
+  ]
 }
 ```
 
 ```csharp
-// ─────────────────────────────────────────────────────────────────
-// LessonController.cs — Using the cache service
-// ─────────────────────────────────────────────────────────────────
-[ApiController]
-[Route("api/lessons")]
-public class LessonController : ControllerBase
+// appsettings.json — Use DNS names, never IPs
 {
-    private readonly ILessonCacheService _cacheService;
-
-    public LessonController(ILessonCacheService cacheService)
-    {
-        _cacheService = cacheService;
-    }
-
-    [HttpGet("{id:int}")]
-    public async Task<ActionResult<Lesson>> GetLesson(int id)
-    {
-        var lesson = await _cacheService.GetLessonAsync(id);
-        return lesson is null ? NotFound() : Ok(lesson);
-    }
-
-    [HttpPut("{id:int}")]
-    public async Task<IActionResult> UpdateLesson(int id, UpdateLessonRequest request)
-    {
-        // ... update the lesson in DB ...
-        
-        // After updating, invalidate the cache so next read gets fresh data
-        await _cacheService.InvalidateLessonAsync(id);
-        return NoContent();
-    }
+  "ServiceUrls": {
+    "VideoService":    "http://video-service:8080",    // ECS Service Connect DNS
+    "ProgressService": "http://progress-service:8080",
+    "NotifyService":   "http://notify-service:8080"
+  }
 }
 ```
 
----
+ECS handles load balancing across all healthy instances of `video-service` automatically. If an instance becomes unhealthy, ECS stops routing to it within seconds.
 
-## 9. Service Discovery — Finding Each Other in the Network
+### AWS Cloud Map (for Non-ECS Services)
 
-In a distributed system, services need to find each other. But as we learned in Fallacy 5, you can't hardcode IP addresses — machines change. **Service discovery** is the mechanism by which services register themselves and find each other dynamically.
-
-### How It Works
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Service Discovery Flow                         │
-│                                                                   │
-│  1. Service starts up → registers itself with Service Registry   │
-│     "I am VideoService, running at 10.0.1.42:8080, healthy"     │
-│                                                                   │
-│  2. Client wants to call VideoService:                           │
-│     - Query the Registry: "Where is VideoService?"              │
-│     - Registry returns: ["10.0.1.42:8080", "10.0.1.55:8080"]   │
-│     - Client picks one and makes the call                       │
-│                                                                   │
-│  3. If a service crashes:                                        │
-│     - It stops sending health check heartbeats                   │
-│     - Registry removes it from the list                         │
-│     - No more traffic is sent to the dead instance              │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-In modern cloud deployments, **Kubernetes** handles service discovery automatically through its DNS system. Services are registered as Kubernetes Services and are addressable by name (e.g., `http://video-service.default.svc.cluster.local`). The Kubernetes DNS system handles routing behind the scenes.
-
-In a non-Kubernetes environment, **Consul** by HashiCorp is a popular service registry.
-
-For our examples throughout this book, we'll use the Kubernetes-style DNS approach, which is what most production systems use today.
+If some components run outside ECS (e.g., a Lambda function, an on-premises integration), **AWS Cloud Map** provides a service registry that any AWS service can register with and query.
 
 ---
 
-## 10. The Education Platform Scenario
+## 10. The Grapeseed Scenario
 
-Let's put everything together. Here is how LinguaLearn's core lesson-delivery flow works using distributed system principles:
+Let's trace a complete request through the Grapeseed distributed system:
 
 ```
-Student in Vietnam opens the LinguaLearn mobile app and taps "Start Lesson 12"
+A student in Thailand opens the Grapeseed app and taps "Start Unit 3, Lesson 1".
 
-1. The request hits the CDN (Cloudflare) edge node in Singapore.
-   Static assets (images, CSS, JS) are served from the CDN cache immediately.
-   
-2. The API call goes to the API Gateway, which routes it to the Lesson Service.
-   The Lesson Service has 3 instances running across 2 availability zones.
-   The Load Balancer picks the least-busy instance.
+1. CloudFront (CDN) Edge Node (Bangkok):
+   Static assets (app JS, CSS, images) → served from CloudFront cache.
+   Latency: ~5ms. No ECS instance involved.
 
-3. Lesson Service checks Redis distributed cache for Lesson 12.
-   CACHE HIT — the lesson content was loaded earlier, served in ~2ms.
+2. API Request → AWS API Gateway (Regional Endpoint):
+   GET /api/lessons/unit/3/lesson/1
+   API Gateway validates the JWT token (using Cognito or our IdentityService).
+   Routes request to LessonService ALB target group.
 
-4. Lesson Service calls Video Service to get the video URL for Lesson 12.
-   The Polly circuit breaker checks: is Video Service healthy?
-   YES — the call goes through. Video URL returned.
-   
-   (If Video Service was failing, the circuit breaker would return a fallback 
-   URL pointing to the last known-good video URL or a "video temporarily 
-   unavailable" message. The lesson still loads.)
+3. ALB (Application Load Balancer) → LessonService:
+   ALB uses Least Outstanding Requests algorithm.
+   Routes to the least-busy ECS task.
+   LessonService runs in ap-southeast-1 (Singapore) across 3 AZs.
 
-5. Progress Service is called asynchronously (fire-and-forget) to record 
-   that the student started Lesson 12.
-   This call goes through a message queue. Even if Progress Service is 
-   temporarily down, the event is queued and processed when it recovers.
+4. LessonService processes the request:
+   a. ElastiCache lookup → HIT (lesson was cached 20 minutes ago) → ~1ms.
+   b. Calls VideoService via HTTP (ECS Service Connect DNS):
+      - Polly checks: is circuit closed? YES.
+      - HTTP GET http://video-service:8080/api/videos/v-unit3-les1/metadata
+      - Response in ~15ms.
+   c. Assembles lesson + video metadata into response.
 
-6. All data is assembled and returned to the student in ~50ms.
-   The student taps Play. The video streams from the nearest CDN node.
-   
-Total time: ~50ms for the lesson metadata. Video streaming starts in ~200ms.
-The student sees no loading spinner.
+5. Student's device receives response in ~50ms.
+   They tap Play. Video streams from S3 via CloudFront.
+   CloudFront serves the video from the nearest edge node.
+
+6. Async (fire-and-forget via SQS):
+   LessonService publishes "LessonStarted" message to SQS queue.
+   ProgressService reads the queue and updates the student's progress.
+   This happens in the background. The student doesn't wait for it.
 ```
 
 ---
 
 ## 11. Decision Guide — When to Go Distributed
 
-Before you add distributed complexity to your system, make sure you actually need it. Distributed systems are powerful but significantly more complex to build, deploy, and debug than single-server systems.
-
 ### When to Add Distribution
 
 | Signal | Action |
 |--------|--------|
-| Single server CPU is consistently > 70% | Add horizontal scaling |
-| Database queries are taking > 100ms regularly | Add read replicas and caching |
-| A single service failure takes down everything | Add redundancy and circuit breakers |
-| Deploy one component causes downtime for others | Separate into independent services |
-| Teams are blocked on each other for deployments | Consider microservices boundaries |
-| Users in different continents experience high latency | Add geo-distributed nodes / CDN |
+| Single ECS task CPU consistently > 70% | Enable ECS Auto Scaling |
+| RDS query times > 100ms regularly | Add read replicas, add caching |
+| Single AZ failure takes down everything | Deploy across 3 AZs with Multi-AZ RDS |
+| Deploying one service forces redeploy of others | Separate into independent services |
+| Teams are blocked on each other for releases | Consider microservices boundaries |
+| Students in Asia experience high latency | Add CloudFront + regional ECS deployment |
 
-### When NOT to Add Distribution (yet)
+### When NOT to Add Distribution Yet
 
 | Signal | Action |
 |--------|--------|
-| You have fewer than 10,000 daily active users | Scale vertically first — it's simpler |
-| Your team has fewer than 5 engineers | Monolith is easier to maintain |
-| You are still finding product-market fit | Don't optimize prematurely |
-| Your current server is at 20% CPU usage | You have headroom — don't complicate it yet |
-
-> **The Golden Rule:** A well-optimized monolith can serve millions of users. Instagram ran on 3 engineers and a PostgreSQL database when it was acquired by Facebook for $1 billion, serving 13 million users. Start simple. Add distribution when you have concrete evidence you need it.
+| Fewer than 5,000 daily active users | Scale vertically (upgrade EC2/RDS) |
+| Team has fewer than 5 engineers | Stay with a modular monolith |
+| Still defining core features | Don't optimize architecture prematurely |
+| Current infra is at 20% capacity | You have plenty of headroom |
 
 ---
 
 ## 12. Summary and Key Takeaways
-
-You have covered the fundamentals of distributed systems. Here is what to carry with you:
 
 ### Core Concepts
 
@@ -804,25 +711,21 @@ You have covered the fundamentals of distributed systems. Here is what to carry 
 |---------|-----------------|
 | Distributed System | Multiple computers working together as one coherent system |
 | 8 Fallacies | The network is NOT reliable, zero-latency, or free. Design accordingly. |
-| CAP Theorem | You can't have strong consistency AND high availability during partitions. Choose. |
-| Eventual Consistency | Data will be consistent... eventually. Often good enough for education content. |
-| Fault Tolerance | Design to survive failures, not just prevent them. |
-| Circuit Breaker | Fail fast when a dependency is down to prevent cascading failures. |
-| Distributed Cache | Share cached data across all server instances via Redis. |
-| Service Discovery | Services find each other dynamically, not via hardcoded IPs. |
+| CAP Theorem | Choose between strong consistency and high availability during partitions. |
+| Eventual Consistency | Data will be consistent eventually. Good enough for most Grapeseed content. |
+| Fault Tolerance | Design to survive failures — especially AZ failures on AWS. |
+| Circuit Breaker (Polly) | Fail fast when a dependency is down. Prevent cascading failures. |
+| ElastiCache (Redis) | Distributed cache shared across all ECS instances. |
+| ECS Service Connect | DNS-based service discovery — services find each other by name, not IP. |
 
 ### The Three Rules of Distributed Systems
 
-1. **Expect failure** — Every call can fail. Every service can go down. Design for it.
-2. **Embrace eventual consistency** — Not everything needs to be perfectly consistent all the time. Know which data does and which doesn't.
-3. **Observe everything** — You can't debug what you can't see. Log every call, trace every request, monitor every service.
-
-### What's Next
-
-You now understand how distributed systems work and why they are challenging. In the next chapter, we tackle a problem that sits on top of distribution: how do you serve many different schools (tenants) from the same system while keeping their data completely isolated?
+1. **Expect failure** — AWS has outages. Design for them, not against them.
+2. **Embrace eventual consistency** — Not everything needs to be perfectly consistent in real time.
+3. **Observe everything** — Use CloudWatch + X-Ray. You can't debug what you can't see.
 
 *→ Continue to: [Chapter 2 — Multi-Tenant Architecture](./book_ch2_multi_tenant_systems.md)*
 
 ---
 
-*Chapter 1 Complete · 12 sections · Distributed Systems Fundamentals*
+*Chapter 1 Complete · 12 sections · Distributed Systems on AWS*

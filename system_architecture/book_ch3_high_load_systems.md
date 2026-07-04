@@ -1,301 +1,337 @@
 # Chapter 3: High Load Systems
 
-> **Performance Engineering · Scalability · High Availability**
-> *"Any sufficiently popular system will eventually be crushed under its own success. The engineers who survive this know it's coming and prepare."*
+> **Performance Engineering · AWS Auto-Scaling · High Availability**
+> *"Any system popular enough to matter will eventually be crushed under its own success. The engineers who survive this know it's coming and prepare."*
 
 ---
 
 ## Table of Contents
 
-1. [Introduction — The Day the Platform Stood Still](#1-introduction)
+1. [Introduction — National Exam Day](#1-introduction)
 2. [What Is High Load? The Numbers That Matter](#2-what-is-high-load)
 3. [The Bottleneck Hunt — Finding What Breaks First](#3-bottleneck-hunt)
-4. [Scaling Strategies — Going Up vs. Going Wide](#4-scaling-strategies)
-5. [Load Balancing — Sharing the Work Fairly](#5-load-balancing)
-6. [The Caching Hierarchy — From CDN to Database](#6-caching-hierarchy)
-7. [Database at Scale — Read Replicas and Sharding](#7-database-at-scale)
-8. [Connection Pooling — Don't Waste Your Database Connections](#8-connection-pooling)
-9. [Async Processing and Message Queues](#9-async-processing)
-10. [Rate Limiting — Protecting Your System from Overload](#10-rate-limiting)
-11. [Background Jobs with Hangfire](#11-background-jobs)
-12. [The Education Platform Scenario — Exam Day](#12-education-platform-scenario)
+4. [Scaling on AWS — Vertical, Horizontal, and Auto-Scaling](#4-scaling-on-aws)
+5. [AWS Application Load Balancer](#5-application-load-balancer)
+6. [The Caching Hierarchy — CloudFront to ElastiCache to RDS](#6-caching-hierarchy)
+7. [MediatR Caching Pipeline Behavior](#7-mediatr-caching-behavior)
+8. [RDS at Scale — Read Replicas and Connection Pooling](#8-rds-at-scale)
+9. [Async Processing with Amazon SQS](#9-async-processing-with-sqs)
+10. [Rate Limiting — Protecting Grapeseed from Overload](#10-rate-limiting)
+11. [Background Jobs with Hangfire on AWS](#11-background-jobs)
+12. [The Grapeseed Scenario — Exam Day](#12-grapeseed-scenario)
 13. [Decision Guide](#13-decision-guide)
 14. [Summary and Key Takeaways](#14-summary)
 
 ---
 
-## 1. Introduction — The Day the Platform Stood Still
+## 1. Introduction — National Exam Day
 
-It's 7:55 AM on a Monday. Across Vietnam, 200,000 students are about to take their national English proficiency test using LinguaLearn. At exactly 8:00 AM, every one of them opens the app. The platform — which handles a steady 5,000 users on a normal morning — is suddenly hit with 40 times its usual traffic in under 60 seconds.
+It's Sunday evening in Vietnam. Tomorrow is the national English proficiency assessment for 180,000 middle school students. As part of their preparation, all students are using the Grapeseed program assigned by their school district. At 8:00 AM Monday, every single one of them opens the app.
 
-If your system is not designed for this, here is exactly what happens:
+In 60 seconds, Grapeseed goes from its normal Monday morning traffic of 8,000 active users to 180,000. That's a 22x traffic spike. Your AWS bill is about to have a very interesting line item — or your error logs are.
 
-- **8:00:01** — Login requests spike. The authentication service is handling 3,000 requests per second.
-- **8:00:05** — The database connection pool hits its limit. Queries start queuing.
-- **8:00:12** — Application servers run out of available threads. New requests start timing out.
-- **8:00:23** — Memory fills up. The garbage collector starts running frequently, pausing the application.
-- **8:00:45** — Application servers start crashing. The load balancer is routing to dead instances.
-- **8:01:00** — Complete outage. 200,000 students see error pages. Teachers are panicking.
-- **8:01:30** — Your phone rings. It's the Minister of Education.
+If your infrastructure isn't designed for this moment:
 
-This scenario is not hypothetical. It has happened to real companies, often with devastating business consequences. High load engineering is the discipline of making sure it never happens to you.
+- **8:00:00** — ECS tasks hit 100% CPU. New requests start queuing at the ALB.
+- **8:00:15** — RDS connection pool exhausted. EF Core throws `NpgsqlException: connection pool exhausted`.
+- **8:00:30** — ElastiCache cache misses spike because the app is restarting.
+- **8:00:45** — ECS health checks fail. ALB routes to fewer and fewer healthy tasks.
+- **8:01:00** — Complete outage. 180,000 students see a white error screen.
+- **8:01:30** — The school district administrator calls Grapeseed support.
 
-This chapter teaches you how to think about load, how to find your system's weak points before they snap, and how to build systems that can absorb massive traffic spikes and keep running.
+**High load engineering prevents this.** It is the discipline of anticipating traffic patterns, designing systems with appropriate headroom and elasticity, and building automatic responses to demand spikes — so that when exam day arrives, the platform absorbs it without anyone touching a server.
 
 ---
 
 ## 2. What Is High Load? The Numbers That Matter
 
-"High load" is relative. A system that handles 100 requests per second might be at 10% capacity for one application and at 100% for another. To reason about load, you need to speak in concrete metrics.
+"High load" is relative. To reason about it, you need concrete metrics.
 
-### The Core Performance Metrics
+### Throughput (Requests Per Second)
 
-#### Throughput (RPS / TPS)
-The number of requests (or transactions) your system processes per second.
+How many requests your system processes every second:
+- **Normal morning:** ~500 RPS (teachers planning lessons, students doing homework)
+- **After-school peak:** ~3,000 RPS (students doing assigned lessons)
+- **Exam prep day:** ~15,000 RPS (entire student body active simultaneously)
 
-- **Low load:** 10-100 RPS — a small internal tool
-- **Medium load:** 1,000-10,000 RPS — a mid-sized SaaS product
-- **High load:** 100,000+ RPS — a nationally-used platform like LinguaLearn on exam day
+### Latency Percentiles (P50, P95, P99)
 
-#### Latency (P50, P95, P99)
-How long it takes to process one request. But averages are misleading. A better measure is **percentiles**:
+Average latency is misleading. Use percentiles:
 
-- **P50 (median):** 50% of requests are faster than this. If P50 = 50ms, half your users wait less than 50ms.
-- **P95:** 95% of requests are faster than this. The slowest 5%.
-- **P99:** 99% of requests are faster than this. The slowest 1% — your most frustrated users.
-- **P99.9:** The worst 0.1% — often where you find cascading failures hiding.
+| Metric | Meaning | Grapeseed Target |
+|--------|---------|-----------------|
+| **P50 (median)** | Half of requests are faster than this | < 100ms |
+| **P95** | 95% of requests are faster than this | < 300ms |
+| **P99** | 99% of requests are faster than this | < 1,000ms |
+| **P99.9** | The slowest 0.1% | < 3,000ms |
 
-```
-A deceptive scenario:
-  Average latency: 50ms  ← looks great!
-  P95 latency:    200ms  ← getting worse
-  P99 latency:   2000ms  ← 2 seconds! 1 in 100 users has a terrible experience
-  P99.9 latency: 30000ms ← 30 seconds! These users are giving up
+A system that shows "average: 80ms" but "P99: 8,000ms" is not performing well — 1 in 100 students is waiting 8 seconds.
 
-Never optimize for average. Optimize for percentiles.
-```
+### Availability Targets
 
-#### Availability (The "Nines")
-How often your system is actually working. Usually expressed as a percentage per year:
+| Availability | Downtime / Year | Downtime / Month | Target |
+|-------------|-----------------|-----------------|--------|
+| 99% | 3.65 days | 7.2 hours | ❌ Too low for Grapeseed |
+| 99.9% | 8.7 hours | 43.8 minutes | ⚠️ Minimum |
+| 99.95% | 4.4 hours | 21.9 minutes | ✅ Good for Grapeseed |
+| 99.99% | 52.6 minutes | 4.4 minutes | 🎯 Target for exam platform |
 
-| Availability | Allowed Downtime / Year | Allowed Downtime / Month |
-|-------------|------------------------|-------------------------|
-| 99% (two nines) | 3.65 days | 7.2 hours |
-| 99.9% (three nines) | 8.7 hours | 43.8 minutes |
-| 99.95% | 4.4 hours | 21.9 minutes |
-| 99.99% (four nines) | 52.6 minutes | 4.4 minutes |
-| 99.999% (five nines) | 5.3 minutes | 26 seconds |
+### Concurrency
 
-For LinguaLearn, where students might take exams on the platform, **99.99% availability** should be the target. That allows just 52 minutes of downtime per year.
-
-#### Concurrency
-How many requests are being processed simultaneously at any given moment. This is what creates contention for resources (database connections, threads, memory).
+How many requests are being processed simultaneously. This is what creates contention for shared resources like database connections and ElastiCache connections.
 
 ---
 
 ## 3. The Bottleneck Hunt — Finding What Breaks First
 
-Every system has a **bottleneck** — the one resource that becomes exhausted first under load. Before you add more servers or optimize code, you need to find the bottleneck. Otherwise, you're treating symptoms while the real problem festers.
-
-Think of it like a water pipe system. You can add as many wide pipes as you want, but if one section of the pipe is narrow, that narrow section determines your maximum flow rate. Widening all the other pipes doesn't help.
-
-### The Four Common Bottlenecks
+Every system has a **bottleneck** — the one resource that becomes exhausted first under load. Before you add more servers, find the bottleneck. Scaling the wrong layer is wasted money and effort.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                    Where Systems Break Under Load                  │
-│                                                                    │
-│  1. CPU Bottleneck                                                │
-│     Symptom: CPU usage 90-100%, slow response times             │
-│     Cause: Expensive computations, lack of async code            │
-│     Fix: Optimize algorithms, add horizontal scaling             │
-│                                                                    │
-│  2. Memory Bottleneck                                             │
-│     Symptom: High GC pressure, OutOfMemoryException             │
-│     Cause: Large in-memory data structures, memory leaks         │
-│     Fix: Streaming instead of buffering, fix leaks               │
-│                                                                    │
-│  3. I/O Bottleneck (Network / Disk)                              │
-│     Symptom: High I/O wait, slow network transfers               │
-│     Cause: Too many DB calls, large payloads, slow disks         │
-│     Fix: Caching, batching, compression, faster storage          │
-│                                                                    │
-│  4. Database Bottleneck                                           │
-│     Symptom: Slow queries, connection pool exhausted             │
-│     Cause: Missing indexes, N+1 queries, too many connections    │
-│     Fix: Add indexes, read replicas, query optimization          │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│              Common Grapeseed Bottlenecks                        │
+│                                                                   │
+│  1. ECS Task CPU Overload                                        │
+│     Symptom: CloudWatch CPU metric > 90%, slow responses        │
+│     Cause: Expensive EF Core queries, missing async/await       │
+│     Fix: Add ECS tasks (Auto Scaling), optimize queries         │
+│                                                                   │
+│  2. RDS Connection Pool Exhausted                                │
+│     Symptom: NpgsqlException pool errors in CloudWatch logs     │
+│     Cause: Too many concurrent ECS tasks, too few connections   │
+│     Fix: Add ElastiCache caching, increase pool size,           │
+│            add RDS Proxy, add read replicas                     │
+│                                                                   │
+│  3. ElastiCache Memory Full                                      │
+│     Symptom: Cache eviction rate spikes, hit rate drops         │
+│     Cause: Caching too much data without TTL management         │
+│     Fix: Review TTLs, increase node size, tune eviction policy  │
+│                                                                   │
+│  4. RDS CPU / I/O Bound Queries                                  │
+│     Symptom: RDS CPU > 80%, slow query logs fill up             │
+│     Cause: Missing indexes, N+1 queries, CartesianExplosion     │
+│     Fix: Add indexes, optimize EF Core LINQ, add read replicas  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### The N+1 Query Problem — A Hidden Load Killer
+### The N+1 Problem — A Silent Grapeseed Killer
 
-One of the most common causes of database bottlenecks is the **N+1 query problem**. It's subtle and easy to create accidentally.
+The N+1 query problem is one of the most common performance killers in EF Core applications. It occurs when you load a list of entities and then access a related entity for each one — triggering N additional database queries.
 
 ```csharp
-// ❌ N+1 Problem: 1 query to get all students, then 1 query PER student
-// For 1,000 students, this executes 1,001 queries!
-var students = await _db.Students.ToListAsync(); // 1 query
-
-foreach (var student in students) 
+// ❌ N+1 PROBLEM: 1 query to get students, then 1 per student for progress
+// For 200 students → 201 queries executed!
+var students = await _db.Students.ToListAsync();
+foreach (var student in students)
 {
-    // EF Core lazy loads progress for each student — 1 query per student!
-    var completedLessons = student.Progress.Count(p => p.IsCompleted);
-    Console.WriteLine($"{student.Name}: {completedLessons} lessons completed");
+    // EF Core lazy-loads progress on each access → separate SQL per student!
+    var lastLesson = student.Progress.MaxBy(p => p.CompletedAt);
+    Console.WriteLine($"{student.Name}: Last lesson unit {lastLesson?.Unit}");
 }
-// Total DB roundtrips: 1,001. Terrible at scale.
+// Total: 201 round-trips to RDS. Catastrophic at scale.
 
-// ✅ Solution: Eager loading with Include()
+// ✅ SOLUTION A: Eager loading with Include()
 var students = await _db.Students
-    .Include(s => s.Progress.Where(p => p.IsCompleted))  // Fetched in ONE query
+    .Include(s => s.Progress)        // JOIN in a single query
     .ToListAsync();
-// Total DB roundtrips: 1. 1,000x better.
+// Total: 1 RDS query. 200x improvement.
 
-// ✅ Even better for large datasets: Projection with Select()
-var report = await _db.Students
-    .Select(s => new {
-        s.Name,
-        CompletedLessons = s.Progress.Count(p => p.IsCompleted)
+// ✅ SOLUTION B: Projection with Select() — even more efficient
+// Only fetches the columns you actually need, computes aggregates in DB
+var studentSummaries = await _db.Students
+    .Select(s => new StudentSummaryDto
+    {
+        StudentId = s.Id,
+        Name = s.Name,
+        CurrentUnit = s.CurrentUnit,
+        CompletedLessons = s.Progress.Count(p => p.IsCompleted),
+        LastCompletedAt = s.Progress
+            .Where(p => p.IsCompleted)
+            .Max(p => (DateTime?)p.CompletedAt)
     })
     .ToListAsync();
-// Sends only needed columns, computed in the DB. Most efficient.
+// Total: 1 query, returning only needed columns. Most efficient.
+```
+
+### Using MediatR for Consistent Query Patterns
+
+Because all queries go through MediatR handlers, you can enforce good patterns once:
+
+```csharp
+// A well-structured MediatR query handler — no N+1 possible
+public class GetClassProgressQueryHandler
+    : IRequestHandler<GetClassProgressQuery, ClassProgressResponse>
+{
+    private readonly GrapeseekDbContext _db;
+
+    public async Task<ClassProgressResponse> Handle(
+        GetClassProgressQuery request,
+        CancellationToken ct)
+    {
+        // Single, efficient query with projection
+        // The GlobalQueryFilter automatically adds WHERE SchoolId = @schoolId
+        var studentData = await _db.Students
+            .Where(s => s.CurrentUnit == request.Unit)
+            .Select(s => new StudentProgressItem
+            {
+                StudentId = s.Id,
+                Name = s.Name,
+                CompletedLessons = s.Progress.Count(p => p.IsCompleted && p.Unit == request.Unit),
+                AverageScore = s.Progress
+                    .Where(p => p.IsCompleted && p.Unit == request.Unit && p.ScorePercent > 0)
+                    .Average(p => (double?)p.ScorePercent) ?? 0
+            })
+            .OrderBy(s => s.Name)
+            .ToListAsync(ct);
+
+        return new ClassProgressResponse
+        {
+            Unit = request.Unit,
+            Students = studentData,
+            ClassAverageScore = studentData.Any()
+                ? studentData.Average(s => s.AverageScore) 
+                : 0
+        };
+    }
+}
 ```
 
 ---
 
-## 4. Scaling Strategies — Going Up vs. Going Wide
-
-When your system runs out of capacity, you have two fundamental options:
+## 4. Scaling on AWS — Vertical, Horizontal, and Auto-Scaling
 
 ### Vertical Scaling (Scale Up)
 
-Make the existing machine more powerful: more CPU cores, more RAM, faster storage.
+Upgrade the existing resource to a more powerful tier:
+- ECS task: increase vCPU from 0.5 to 2 vCPU
+- RDS: upgrade from `db.t3.medium` to `db.r6g.xlarge`
 
-```
-Before:                    After:
-[2-core server]       →   [32-core server]
-[8 GB RAM]            →   [256 GB RAM]
-[HDD]                 →   [NVMe SSD]
-```
-
-**✅ Pros:**
-- Simple — no code changes needed
-- No distribution complexity
-- Works for databases that are hard to shard
-
-**❌ Cons:**
-- Has a hard ceiling — the biggest machines available
-- Expensive (cost grows super-linearly with specs)
-- Single point of failure — one machine, one failure = total outage
-- Requires downtime to upgrade
-
-**Verdict:** Use vertical scaling first, as a quick fix. But plan for horizontal scaling as your long-term strategy.
+**✅ Good for:** Quick fix, database scaling (harder to shard).
+**❌ Bad for:** Long-term — has a hard ceiling and creates a single point of failure.
 
 ### Horizontal Scaling (Scale Out)
 
-Add more machines. Each machine runs the same application, and a load balancer distributes requests across them.
+Add more instances of the same resource:
+- ECS: increase desired task count from 3 to 20
+- RDS: add read replicas
 
+**✅ Good for:** Application tier — stateless ECS tasks scale horizontally perfectly.
+**❌ Requires:** Application must be **stateless**. No session data in ECS task memory — use ElastiCache for sessions.
+
+### ECS Fargate Auto Scaling
+
+The best of both worlds for ECS: **automatically add or remove tasks** based on real-time metrics.
+
+```json
+// ECS Auto Scaling Policy (Terraform or CloudFormation)
+{
+  "auto_scaling": {
+    "min_capacity": 3,      // Always keep at least 3 tasks running (for HA)
+    "max_capacity": 50,     // Never exceed 50 tasks (cost control)
+    "target_tracking_policies": [
+      {
+        "name": "cpu-target-tracking",
+        "metric": "ECSServiceAverageCPUUtilization",
+        "target_value": 65,           // Scale out when average CPU > 65%
+        "scale_out_cooldown": 60,     // Wait 60s after scaling out before scaling again
+        "scale_in_cooldown": 300      // Wait 5 minutes before scaling in (avoid thrashing)
+      },
+      {
+        "name": "memory-target-tracking",
+        "metric": "ECSServiceAverageMemoryUtilization",
+        "target_value": 75,
+        "scale_out_cooldown": 60,
+        "scale_in_cooldown": 300
+      }
+    ]
+  }
+}
 ```
-Before:                    After:
-                          [Server 1]
-[Single Server]    →   ┌──[Server 2]──┐
-                   │   │  [Server 3]  │  Load Balancer
-                   └──►│  [Server 4]  ├──► Users
-                       │  [Server 5]  │
-                       └─────────────┘
+
+With this configuration, when exam day traffic hits:
+1. ECS detects average CPU climbing above 65%
+2. ECS Auto Scaling adds tasks (roughly 2x tasks every 60 seconds until stable)
+3. New tasks register with the ALB automatically
+4. ALB distributes traffic to the growing task fleet
+5. After exam day, CPU drops — ECS scales back in, saving money
+
+**For Grapeseed, set up a Scheduled Scaling action** for known exam days:
+
+```json
+{
+  "scheduled_actions": [
+    {
+      "name": "exam-day-scale-up",
+      "schedule": "cron(0 0 * * MON)",    // Every Monday at midnight UTC
+      "min_capacity": 15,                  // Pre-warm 15 tasks before traffic hits
+      "max_capacity": 80
+    },
+    {
+      "name": "exam-day-scale-down",
+      "schedule": "cron(0 12 * * MON)",   // Scale back at noon UTC
+      "min_capacity": 3,
+      "max_capacity": 50
+    }
+  ]
+}
 ```
 
-**✅ Pros:**
-- Theoretically unlimited scaling — add more machines as needed
-- Resilient — if one server dies, others handle the load
-- Cost-efficient — use many cheap machines instead of one expensive one
-- Can scale different components independently
-
-**❌ Cons:**
-- Application must be **stateless** (session data can't be stored on individual servers)
-- Requires load balancing infrastructure
-- Distributed system complexity (see Chapter 1)
-- Database scaling is more complex
-
-**Critical requirement for horizontal scaling:** Your application must be **stateless**. This means an HTTP request from User A to Server 1 at 10:00 AM, and then User A's next request going to Server 3 at 10:01 AM, must work identically. The application cannot store any per-user session data in the server's memory.
-
-Instead, all shared state must live in external systems:
-- User sessions → Redis
-- File uploads → S3 / Azure Blob Storage  
-- Distributed locks → Redis or ZooKeeper
-- Caching → Redis
+Pre-warming eliminates the cold-start lag where tasks need 30-60 seconds to spin up before accepting traffic.
 
 ---
 
-## 5. Load Balancing — Sharing the Work Fairly
+## 5. AWS Application Load Balancer
 
-A **load balancer** sits in front of your server fleet and routes incoming requests to individual servers. It's the traffic cop of your system.
+The ALB is Grapeseed's traffic cop. It sits between CloudFront and the ECS tasks and routes each request to a healthy, available task.
 
-### Load Balancing Algorithms
+### ALB Health Checks
 
-#### Round Robin
-The simplest algorithm. Route request 1 to Server 1, request 2 to Server 2, request 3 to Server 3, request 4 back to Server 1...
-
-```
-Request 1 → Server 1
-Request 2 → Server 2
-Request 3 → Server 3
-Request 4 → Server 1 (cycle repeats)
-```
-
-✅ Good for: Uniform requests where each takes roughly the same time.
-❌ Bad for: Mixed workloads (short lesson fetch + slow video transcoding on the same servers).
-
-#### Least Connections
-Route each new request to the server with the fewest active connections.
-
-```
-Server 1: 150 active connections
-Server 2: 23 active connections  ← Next request goes here
-Server 3: 89 active connections
-```
-
-✅ Good for: Variable-length requests where some take much longer than others.
-✅ More sophisticated and generally better than round robin.
-
-#### Consistent Hashing
-Route requests based on a hash of some request attribute (user ID, tenant ID). The same user always goes to the same server.
-
-```
-hash("student-123") % 3 = 1  → always Server 1
-hash("student-456") % 3 = 0  → always Server 0
-hash("student-789") % 3 = 2  → always Server 2
-```
-
-✅ Good for: Caching strategies where having the same server handle the same user improves cache hit rates.
-
-### Health Checks
-
-Load balancers continuously check if their backend servers are healthy. If a server fails its health check, the load balancer stops sending it traffic.
+The ALB pings every ECS task's `/health` endpoint every 15 seconds. If a task fails 2 consecutive health checks, it's marked as unhealthy and no new requests are routed to it.
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// Program.cs — Health check endpoints (required for load balancers)
+// Health check endpoint — required for ECS + ALB
 // ─────────────────────────────────────────────────────────────────
 builder.Services.AddHealthChecks()
-    .AddDbContextCheck<ApplicationDbContext>("database")
-    .AddRedis(builder.Configuration.GetConnectionString("Redis")!, "redis")
-    .AddCheck("self", () => HealthCheckResult.Healthy());
+    // Check RDS PostgreSQL connectivity
+    .AddNpgSql(
+        connectionString: builder.Configuration.GetConnectionString("GrapeseekDb")!,
+        name: "rds-postgres",
+        tags: new[] { "db", "ready" })
+    // Check SQL Server (Analytics DB) connectivity
+    .AddSqlServer(
+        connectionString: builder.Configuration.GetConnectionString("AnalyticsDb")!,
+        name: "rds-sqlserver",
+        tags: new[] { "db", "ready" })
+    // Check ElastiCache connectivity
+    .AddRedis(
+        builder.Configuration["AWS:ElastiCache:Endpoint"]!,
+        name: "elasticache",
+        tags: new[] { "cache", "ready" })
+    // Basic self-check — just confirms the process is alive
+    .AddCheck("self", () => HealthCheckResult.Healthy(), tags: new[] { "live" });
 
 var app = builder.Build();
 
-// Load balancer pings this endpoint every 10 seconds
+// ALB health check — checks all registered health checks
+// Returns 200 if healthy, 503 if any check fails
 app.MapHealthChecks("/health", new HealthCheckOptions
 {
-    ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse
+    ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse,
+    ResultStatusCodes =
+    {
+        [HealthStatus.Healthy] = StatusCodes.Status200OK,
+        [HealthStatus.Degraded] = StatusCodes.Status200OK,  // Degraded still accepts traffic
+        [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable
+    }
 });
 
-// Kubernetes liveness probe — is the app alive?
+// ECS liveness probe — just "is the process alive?"
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
-    Predicate = r => r.Name == "self"
+    Predicate = r => r.Tags.Contains("live")
 });
 
-// Kubernetes readiness probe — is the app ready to accept traffic?
+// ECS readiness probe — "is the task ready to serve traffic?"
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
 {
     Predicate = r => r.Tags.Contains("ready")
@@ -304,612 +340,730 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 
 ---
 
-## 6. The Caching Hierarchy — From CDN to Database
+## 6. The Caching Hierarchy — CloudFront to ElastiCache to RDS
 
-Caching is the single most effective technique for handling high load. Every layer of your system can have a cache, and together they create a **defense-in-depth** against database overload.
-
-Think of it like a library. Instead of walking all the way to the basement archives every time you need a book (the database), you:
-1. Check if you already have the book on your desk (local memory cache)
-2. Check the branch library's shelf (distributed cache / Redis)
-3. Check the main city library (CDN cache)
-4. Only as a last resort, go to the basement archives (the database)
-
-### The Four Cache Layers
+Think of Grapeseed's caching as four progressively slower layers:
 
 ```
-Client Request
+Student Request
       │
       ▼
-[Layer 1: CDN Cache] ─── Static assets: HTML, CSS, JS, images
-      │                   Hit rate: ~95%  Latency: ~5ms
-      │ Miss
+[Layer 1: CloudFront CDN]
+  - Static assets: HTML, CSS, JavaScript, fonts, lesson images
+  - Lesson video streaming (S3 → CloudFront → Student)
+  - Cache duration: 24 hours for assets, 1 hour for API responses on public endpoints
+  - Hit rate: ~70% of all traffic
+  - Latency: 5-20ms from nearest edge location
+      │
+      │ Cache miss for dynamic API calls
       ▼
-[Layer 2: API Response Cache] ─── Cached responses in Nginx / API Gateway
-      │                            Hit rate: ~60%  Latency: ~10ms
-      │ Miss
+[Layer 2: AWS API Gateway Cache]
+  - Caches responses from ECS tasks for public/shared endpoints
+  - Example: GET /api/grapeseed-units (list of all units — same for everyone)
+  - Cache duration: 5 minutes
+  - Latency: ~10ms if cached
+      │
+      │ Authenticated / tenant-specific requests
       ▼
-[Layer 3: Distributed Cache (Redis)] ─── Shared application-level cache
-      │                                   Hit rate: ~80% of DB queries  Latency: ~1ms
-      │ Miss
+[Layer 3: Amazon ElastiCache (Redis)]
+  - Lesson content, school configuration, student profiles
+  - Managed by application code (Cache-Aside pattern)
+  - Cache duration: varies by data type (see table below)
+  - Latency: ~1ms
+      │
+      │ Cache miss
       ▼
-[Layer 4: Database] ─── Source of truth (the real data)
-                          Latency: ~10-100ms. Hit rate is 100% (always has the data)
+[Layer 4: Amazon RDS (PostgreSQL / SQL Server)]
+  - Source of truth for all data
+  - Latency: 10-50ms for indexed queries
+  - Always has the data; question is how often to hit it
 ```
 
-### CDN — Caching at the Edge
+### Cache TTL Strategy for Grapeseed
 
-A **CDN (Content Delivery Network)** is a global network of servers that cache your content near your users. Instead of a student in Hanoi making a round trip to your server in Singapore, they get the content from the nearest CDN node — which might be in Hanoi itself, reducing latency from 30ms to 3ms.
+| Data Type | TTL | Reasoning |
+|-----------|-----|-----------|
+| Grapeseed unit/lesson metadata | 4 hours | Content doesn't change without a curriculum update |
+| School (tenant) configuration | 30 minutes | Settings change occasionally |
+| Student profile | 15 minutes | Students update names/emails occasionally |
+| Student progress snapshot | 5 minutes | Updated frequently during study sessions |
+| Teacher class list | 10 minutes | Class assignments change at semester start |
+| Feature flags for school | 30 minutes | Subscription tier changes are rare |
+| Authentication token data | Match JWT expiry | Must be in sync with identity service |
 
-LinguaLearn uses a CDN for:
-- All static assets (JavaScript, CSS, fonts, images)
-- Lesson video files (the biggest bandwidth savings)
-- Cached API responses for public or rarely-changing data
+### CloudFront Configuration for Grapeseed
 
-### In-Memory Cache vs. Distributed Cache
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// When to use IMemoryCache (In-Process, Single Server)
-// ─────────────────────────────────────────────────────────────────
-// Use for: Small, frequently-read reference data that rarely changes
-// Example: The list of supported languages, available lesson levels
-// ─────────────────────────────────────────────────────────────────
-
-builder.Services.AddMemoryCache();
-
-public class ReferenceDataService
+```json
+// CloudFront cache behavior rules (simplified)
 {
-    private readonly IMemoryCache _cache;
-    private readonly ILanguageRepository _repository;
-
-    public async Task<IEnumerable<Language>> GetSupportedLanguagesAsync()
+  "cache_behaviors": [
     {
-        // Cache key for supported languages
-        return await _cache.GetOrCreateAsync("supported_languages", async entry =>
-        {
-            // This rarely changes — cache for 6 hours
-            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(6);
-            entry.Priority = CacheItemPriority.High; // Don't evict this early
-            
-            return await _repository.GetAllLanguagesAsync();
-        }) ?? Enumerable.Empty<Language>();
+      "path_pattern": "/static/*",
+      "cache_policy": "24 hours",
+      "comment": "JS, CSS, fonts — change only on deployment"
+    },
+    {
+      "path_pattern": "/lessons/*/video/*",
+      "cache_policy": "7 days",
+      "origin": "S3",
+      "comment": "Grapeseed lesson videos — rarely change"
+    },
+    {
+      "path_pattern": "/api/public/*",
+      "cache_policy": "5 minutes",
+      "comment": "Public API responses — unit list, school info by subdomain"
+    },
+    {
+      "path_pattern": "/api/*",
+      "cache_policy": "no-cache",
+      "forward_headers": ["Authorization"],
+      "comment": "Authenticated API calls — never cache in CDN"
     }
+  ]
 }
-```
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// When to use IDistributedCache (Redis, Multi-Server)
-// ─────────────────────────────────────────────────────────────────
-// Use for: User-specific data, tenant-specific data, session state
-// Example: Lesson content (changes occasionally), student progress snapshots
-// ─────────────────────────────────────────────────────────────────
-
-// See Chapter 1, Section 8 for the full Redis caching implementation.
-// The pattern is:
-//   1. Get from Redis
-//   2. If miss: get from DB, store in Redis with TTL
-//   3. On update: delete from Redis (cache invalidation)
-```
-
-### Cache TTL Strategy
-
-Choosing the right Time-To-Live (TTL) for cached data is an art:
-
-| Data Type | Suggested TTL | Reasoning |
-|-----------|--------------|-----------|
-| Lesson content | 1 hour | Teachers update lessons occasionally |
-| Video metadata | 4 hours | Rarely changes |
-| Student profile | 15 minutes | User might update their profile |
-| Student progress | 5 minutes | Updates frequently during study sessions |
-| Tenant configuration | 30 minutes | Admins change settings occasionally |
-| Supported languages | 6 hours | Extremely stable |
-| Authentication tokens | Match JWT expiry | Must be in sync |
-
----
-
-## 7. Database at Scale — Read Replicas and Sharding
-
-When caching isn't enough and the database itself becomes the bottleneck, there are two main strategies.
-
-### Read Replicas
-
-In most applications, reads (SELECT) vastly outnumber writes (INSERT/UPDATE/DELETE). Read replicas take advantage of this by maintaining read-only copies of the database that can serve SELECT queries.
-
-```
-                Write Operations (20% of traffic)
-                        │
-                        ▼
-           ┌─────────────────────────┐
-           │      Primary DB         │
-           │   (Read + Write)        │
-           └─────────────────────────┘
-                  │           │
-        Async Replication  Async Replication
-                  │           │
-    ┌─────────────┴──┐   ┌───┴───────────────┐
-    │   Read Replica 1│   │  Read Replica 2   │
-    │   (Read-Only)   │   │  (Read-Only)      │
-    └─────────────────┘   └───────────────────┘
-           ▲                       ▲
-    Read Operations (80%)   Read Operations (80%)
-```
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// Program.cs — Registering Read Replica DbContext
-// ─────────────────────────────────────────────────────────────────
-// Pattern: Use the primary DB for writes, read replicas for reads.
-// This is called CQRS at the infrastructure level.
-// ─────────────────────────────────────────────────────────────────
-
-// Write context — points to the primary database
-builder.Services.AddDbContext<WriteDbContext>(options =>
-    options.UseNpgsql(
-        builder.Configuration.GetConnectionString("PrimaryDatabase")));
-
-// Read context — points to a read replica
-// Can point to a load balancer that routes across multiple replicas
-builder.Services.AddDbContext<ReadDbContext>(options =>
-    options.UseNpgsql(
-        builder.Configuration.GetConnectionString("ReadReplicaDatabase")));
-```
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// LessonRepository.cs — Using read/write split
-// ─────────────────────────────────────────────────────────────────
-public class LessonRepository : ILessonRepository
-{
-    private readonly WriteDbContext _writeDb;  // For INSERT/UPDATE/DELETE
-    private readonly ReadDbContext _readDb;    // For SELECT queries
-
-    public LessonRepository(WriteDbContext writeDb, ReadDbContext readDb)
-    {
-        _writeDb = writeDb;
-        _readDb = readDb;
-    }
-
-    // Read operations → Read Replica (potentially hundreds of these per second)
-    public async Task<Lesson?> GetByIdAsync(int lessonId)
-        => await _readDb.Lessons.FindAsync(lessonId);
-
-    public async Task<List<Lesson>> GetByUnitAsync(int unit)
-        => await _readDb.Lessons
-            .Where(l => l.Unit == unit)
-            .OrderBy(l => l.Id)
-            .ToListAsync();
-
-    // Write operations → Primary DB (much less frequent)
-    public async Task<Lesson> CreateAsync(Lesson lesson)
-    {
-        _writeDb.Lessons.Add(lesson);
-        await _writeDb.SaveChangesAsync();
-        return lesson;
-    }
-
-    public async Task UpdateAsync(Lesson lesson)
-    {
-        _writeDb.Lessons.Update(lesson);
-        await _writeDb.SaveChangesAsync();
-    }
-}
-```
-
-> **⚠️ Replication Lag:** Read replicas are updated asynchronously, so they might be 10-200ms behind the primary. If a teacher updates a lesson and then immediately refreshes their page, they might briefly see the old version. This is eventual consistency in action. For most education content, this is acceptable. For financial data (like payment records), always read from the primary.
-
-### Database Sharding
-
-Sharding splits data across multiple databases by a **shard key**. Each database (shard) holds a subset of the data.
-
-```
-                     Incoming Query
-                           │
-                     Shard Router
-                     (route by TenantId)
-                     /     │     \
-          ┌─────────┘      │      └──────────┐
-          ▼                ▼                 ▼
-   Shard 0             Shard 1           Shard 2
-   Tenants A-H         Tenants I-Q       Tenants R-Z
-   (DB server 1)       (DB server 2)     (DB server 3)
-```
-
-Sharding is complex and should be a last resort. Consider it only when:
-- Your single database server is running at maximum capacity even with read replicas
-- Your dataset is too large to fit on any single machine
-- You need to exceed ~10,000 write operations per second
-
-For LinguaLearn, the **TenantId** is a natural shard key — all data for School Tokyo goes to Shard 0, all data for School London goes to Shard 1, etc.
-
----
-
-## 8. Connection Pooling — Don't Waste Your Database Connections
-
-Creating a new database connection is expensive — it involves network handshaking, authentication, and resource allocation on both the app and database side. This can take 50-500ms. In a high-load scenario, creating a new connection for every request is catastrophic.
-
-**Connection pooling** maintains a pool of pre-established connections that requests can borrow and return, instead of creating and destroying connections for each request.
-
-```
-Without Connection Pool:
-  Request 1 → [Create Connection] → Query → [Destroy Connection]  (~100ms overhead)
-  Request 2 → [Create Connection] → Query → [Destroy Connection]  (~100ms overhead)
-  
-With Connection Pool:
-  App Start → [Create 20 Connections] → Pool
-  
-  Request 1 → [Borrow Connection from Pool] → Query → [Return to Pool]  (~1ms overhead)
-  Request 2 → [Borrow Connection from Pool] → Query → [Return to Pool]  (~1ms overhead)
-  Request 3 → Pool has available connection → instant borrow
-```
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// appsettings.json — Connection string with pooling parameters
-// ─────────────────────────────────────────────────────────────────
-// PostgreSQL connection string (via Npgsql) with explicit pool settings
-// {
-//   "ConnectionStrings": {
-//     "PrimaryDatabase": "Host=db-primary.internal;Database=lingualearn;
-//                         Username=app_user;Password=secret;
-//                         Minimum Pool Size=5;Maximum Pool Size=100;
-//                         Connection Idle Lifetime=300;
-//                         Connection Pruning Interval=10"
-//   }
-// }
-
-// ─────────────────────────────────────────────────────────────────
-// What each pool parameter means:
-// ─────────────────────────────────────────────────────────────────
-// Minimum Pool Size=5     → Keep at least 5 connections alive at all times.
-//                           They'll be ready for the first burst of traffic.
-//
-// Maximum Pool Size=100   → Never exceed 100 connections to this DB server.
-//                           PostgreSQL's limit is typically 100-1000 connections.
-//                           Each connection uses ~5MB of RAM on the DB server.
-//                           With 5 app servers × 100 connections = 500 total.
-//
-// Connection Idle Lifetime=300 → Close connections idle for 5 minutes.
-//                                Prevents hoarding connections we're not using.
-//
-// Key insight: If all 100 connections are busy and a new request comes in,
-// it will WAIT for a connection to become available.
-// If it waits too long → Timeout. This is why at extreme load,
-// even a good connection pool can become the bottleneck.
-// ─────────────────────────────────────────────────────────────────
 ```
 
 ---
 
-## 9. Async Processing and Message Queues
+## 7. MediatR Caching Pipeline Behavior
 
-Not everything needs to happen immediately as part of the HTTP request. Expensive or time-consuming operations can be **deferred** to a background process.
-
-### Synchronous vs. Asynchronous Processing
-
-```
-Synchronous (everything in the request):
-─────────────────────────────────────────
-Student submits quiz
-         │
-         ▼ [10ms] Save quiz answers to DB
-         ▼ [50ms] Calculate score
-         ▼ [30ms] Update student progress
-         ▼ [200ms] Generate PDF certificate (if passed)
-         ▼ [150ms] Send congratulations email
-         ▼ [80ms] Update leaderboard
-Total: 520ms before student sees result. Slow and fragile.
-
-Asynchronous (fast path + background processing):
-──────────────────────────────────────────────────
-Student submits quiz
-         │
-         ▼ [10ms] Save quiz answers to DB
-         ▼ [50ms] Calculate score
-         ▼ [5ms]  Publish "QuizCompleted" event to message queue
-         ▼ Response returned to student: "Quiz completed! Score: 87%"
-Total: 65ms. Fast and resilient.
-
-Meanwhile, in the background:
-Event "QuizCompleted" is processed by:
-  ├── CertificateService: generates PDF certificate
-  ├── EmailService: sends congratulations email
-  └── LeaderboardService: updates rankings
-These run in parallel and don't block the student's response.
-```
-
-### Message Queue with RabbitMQ and MassTransit
+One of the most elegant patterns in a MediatR-based architecture is adding caching as a **pipeline behavior**. Instead of each handler manually checking ElastiCache, you create a behavior that does it automatically for any query that implements `ICachedQuery`.
 
 ```csharp
-// Install: dotnet add package MassTransit.RabbitMQ
-
 // ─────────────────────────────────────────────────────────────────
-// Events/QuizCompletedEvent.cs — The message that gets published
+// ICachedQuery.cs — Marker interface for cacheable queries
 // ─────────────────────────────────────────────────────────────────
-public record QuizCompletedEvent
+public interface ICachedQuery
 {
-    public int StudentId { get; init; }
-    public string TenantId { get; init; } = string.Empty;
-    public int LessonId { get; init; }
-    public int ScorePercent { get; init; }
-    public bool Passed { get; init; }
-    public DateTime CompletedAt { get; init; }
+    /// <summary>
+    /// The ElastiCache key for this query's result.
+    /// Should include all parameters that affect the result.
+    /// </summary>
+    string CacheKey { get; }
+
+    /// <summary>
+    /// How long to cache this query's result in ElastiCache.
+    /// </summary>
+    TimeSpan CacheDuration { get; }
 }
 ```
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// Program.cs — Configure MassTransit with RabbitMQ
+// Behaviors/CachingBehavior.cs — Automatic caching for MediatR queries
 // ─────────────────────────────────────────────────────────────────
-builder.Services.AddMassTransit(mt =>
+public class CachingBehavior<TRequest, TResponse>
+    : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : ICachedQuery
 {
-    // Register consumers (background event handlers)
-    mt.AddConsumer<SendCongratulationsEmailConsumer>();
-    mt.AddConsumer<GenerateCertificateConsumer>();
-    mt.AddConsumer<UpdateLeaderboardConsumer>();
+    private readonly IDistributedCache _cache;
+    private readonly ILogger<CachingBehavior<TRequest, TResponse>> _logger;
 
-    mt.UsingRabbitMq((context, cfg) =>
+    public CachingBehavior(
+        IDistributedCache cache,
+        ILogger<CachingBehavior<TRequest, TResponse>> logger)
     {
-        cfg.Host("rabbitmq://rabbitmq.lingualearn.internal", h =>
-        {
-            h.Username("lingualearn_app");
-            h.Password("secret");
-        });
-
-        // Configure a receive endpoint for the QuizCompleted event
-        cfg.ReceiveEndpoint("quiz-completed-events", e =>
-        {
-            e.ConfigureConsumer<SendCongratulationsEmailConsumer>(context);
-            e.ConfigureConsumer<GenerateCertificateConsumer>(context);
-            e.ConfigureConsumer<UpdateLeaderboardConsumer>(context);
-        });
-    });
-});
-```
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// QuizController.cs — Publishing the event (the fast path)
-// ─────────────────────────────────────────────────────────────────
-[ApiController]
-[Route("api/quiz")]
-public class QuizController : ControllerBase
-{
-    private readonly IQuizService _quizService;
-    private readonly IPublishEndpoint _publishEndpoint;  // MassTransit publisher
-
-    public QuizController(IQuizService quizService, IPublishEndpoint publishEndpoint)
-    {
-        _quizService = quizService;
-        _publishEndpoint = publishEndpoint;
-    }
-
-    [HttpPost("{lessonId:int}/submit")]
-    public async Task<ActionResult<QuizResult>> SubmitQuiz(int lessonId, SubmitQuizRequest request)
-    {
-        // Fast path: save answers and calculate score (synchronous)
-        var result = await _quizService.SubmitAndScoreAsync(lessonId, request);
-
-        // Publish event to the message queue (fast - just puts a message in a queue)
-        await _publishEndpoint.Publish(new QuizCompletedEvent
-        {
-            StudentId = result.StudentId,
-            TenantId = _tenantContext.TenantId,
-            LessonId = lessonId,
-            ScorePercent = result.ScorePercent,
-            Passed = result.Passed,
-            CompletedAt = DateTime.UtcNow
-        });
-
-        // Return result immediately — don't wait for emails, certificates, etc.
-        return Ok(result);
-    }
-}
-```
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// Consumers/SendCongratulationsEmailConsumer.cs
-// This runs in the background, after the HTTP response is already sent
-// ─────────────────────────────────────────────────────────────────
-public class SendCongratulationsEmailConsumer : IConsumer<QuizCompletedEvent>
-{
-    private readonly IEmailService _emailService;
-    private readonly IStudentRepository _students;
-    private readonly ILogger<SendCongratulationsEmailConsumer> _logger;
-
-    public SendCongratulationsEmailConsumer(
-        IEmailService emailService,
-        IStudentRepository students,
-        ILogger<SendCongratulationsEmailConsumer> logger)
-    {
-        _emailService = emailService;
-        _students = students;
+        _cache = cache;
         _logger = logger;
     }
 
-    public async Task Consume(ConsumeContext<QuizCompletedEvent> context)
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken cancellationToken)
     {
-        var @event = context.Message;
-        if (!@event.Passed) return; // Only send email if they passed
+        // Try to get from ElastiCache
+        var cachedJson = await _cache.GetStringAsync(request.CacheKey, cancellationToken);
+        if (cachedJson is not null)
+        {
+            _logger.LogDebug("Cache HIT for key: {CacheKey}", request.CacheKey);
+            return JsonSerializer.Deserialize<TResponse>(cachedJson)!;
+        }
 
-        var student = await _students.GetByIdAsync(@event.StudentId);
-        if (student is null) return;
+        // Cache miss — execute the actual handler
+        _logger.LogDebug("Cache MISS for key: {CacheKey}. Executing handler...", request.CacheKey);
+        var response = await next();
 
-        _logger.LogInformation("Sending congratulations email to {StudentName} for Lesson {LessonId}",
-            student.Name, @event.LessonId);
+        // Store the result in ElastiCache
+        var json = JsonSerializer.Serialize(response);
+        await _cache.SetStringAsync(
+            request.CacheKey,
+            json,
+            new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = request.CacheDuration
+            },
+            cancellationToken);
 
-        await _emailService.SendCongratulationsAsync(
-            toEmail: student.Email,
-            studentName: student.Name,
-            lessonId: @event.LessonId,
-            score: @event.ScorePercent
-        );
+        return response;
+    }
+}
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Usage: A cached query — no cache code in the handler!
+// ─────────────────────────────────────────────────────────────────
+
+// The query declares its own cache key and duration
+public record GetLessonContentQuery(string Unit, int LessonNumber, string SchoolId)
+    : IRequest<LessonContentResponse>, ITenantRequest, ICachedQuery
+{
+    // Cache key includes SchoolId because different schools may have
+    // customized lesson content (premium feature)
+    public string CacheKey => $"lesson-content:{SchoolId}:{Unit}:{LessonNumber}";
+    public TimeSpan CacheDuration => TimeSpan.FromHours(4); // Lesson content is stable
+    public string SchoolId { get; set; } = SchoolId; // Set by TenantValidationBehavior
+}
+
+// The handler is completely clean — no cache logic at all
+// CachingBehavior handles it transparently in the pipeline
+public class GetLessonContentQueryHandler
+    : IRequestHandler<GetLessonContentQuery, LessonContentResponse>
+{
+    private readonly ILessonRepository _repository;
+
+    public GetLessonContentQueryHandler(ILessonRepository repository)
+        => _repository = repository;
+
+    public async Task<LessonContentResponse> Handle(
+        GetLessonContentQuery request,
+        CancellationToken ct)
+    {
+        // This only runs on cache miss — the behavior intercepts on cache hit
+        var lesson = await _repository.GetLessonAsync(request.Unit, request.LessonNumber);
+        return new LessonContentResponse { /* ... */ };
+    }
+}
+```
+
+The MediatR pipeline for this query looks like this:
+
+```
+Incoming: GetLessonContentQuery
+    │
+    ▼ LoggingBehavior: "Handling GetLessonContentQuery"
+    │
+    ▼ TenantValidationBehavior: validates school, stamps SchoolId
+    │
+    ▼ CachingBehavior:
+        ├── Check ElastiCache for "lesson-content:school-bkk-001:Unit3:5"
+        ├── HIT → return cached data immediately (handler never called)
+        └── MISS → call next (handler executes, result stored in ElastiCache)
+    │
+    ▼ GetLessonContentQueryHandler: queries RDS PostgreSQL (only on MISS)
+```
+
+Every lesson load after the first one is served from ElastiCache in ~1ms, regardless of how many students are accessing it simultaneously.
+
+---
+
+## 8. RDS at Scale — Read Replicas and Connection Pooling
+
+### Read Replicas for PostgreSQL
+
+In Grapeseed, reads vastly outnumber writes (students reading lesson content vs. updating progress). RDS Read Replicas offload read traffic from the primary:
+
+```
+Write Operations (15% of traffic):
+  Teacher saves lesson assignment → Primary RDS PostgreSQL
+  Student submits quiz → Primary RDS PostgreSQL
+
+Read Operations (85% of traffic):
+  Students loading lesson content → Read Replica 1 or 2
+  Teachers viewing class dashboards → Read Replica 1 or 2
+  Progress reports → Read Replica 2 (dedicated for reporting)
+
+┌──────────────────────┐
+│    Primary RDS PG    │ ← Write endpoint: grapeseed-db.xxxx.rds.amazonaws.com
+│    (Multi-AZ)        │
+└──────────┬───────────┘
+           │ Async replication (~50-200ms lag)
+    ┌──────┴──────┐
+    │             │
+┌───▼──┐      ┌───▼──┐
+│Replica│      │Replica│
+│  1    │      │  2    │ ← Read endpoint: grapeseed-db.xxxx.ap-southeast-1.rds.amazonaws.com
+│(AZ-b) │      │(AZ-c) │   (RDS automatically load-balances across all replicas)
+└───────┘      └───────┘
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Program.cs — Register separate write and read DbContexts
+// ─────────────────────────────────────────────────────────────────
+
+// Write context → Primary RDS endpoint
+builder.Services.AddDbContext<GrapeseekWriteDbContext>(options =>
+    options.UseNpgsql(builder.Configuration["ConnectionStrings:GrapeseekPrimary"]));
+
+// Read context → RDS Read Replica cluster endpoint
+// RDS automatically distributes reads across available replicas
+builder.Services.AddDbContext<GrapeseekReadDbContext>(options =>
+    options.UseNpgsql(builder.Configuration["ConnectionStrings:GrapeseekReadReplica"])
+           .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)); // Read-only: skip change tracking
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// MediatR handlers use the appropriate context
+// ─────────────────────────────────────────────────────────────────
+
+// QUERY handler → Read Replica (high frequency, read-only)
+public class GetStudentProgressQueryHandler
+    : IRequestHandler<GetStudentProgressQuery, StudentProgressResponse>
+{
+    private readonly GrapeseekReadDbContext _readDb; // ← Read Replica
+
+    public GetStudentProgressQueryHandler(GrapeseekReadDbContext readDb)
+        => _readDb = readDb;
+
+    public async Task<StudentProgressResponse> Handle(
+        GetStudentProgressQuery request, CancellationToken ct)
+    {
+        // Executes on Read Replica — no load on Primary
+        return await _readDb.Students
+            .Where(s => s.Id == request.StudentId)
+            .Select(s => new StudentProgressResponse { /* ... */ })
+            .FirstOrDefaultAsync(ct)
+            ?? throw new NotFoundException($"Student {request.StudentId} not found");
+    }
+}
+
+// COMMAND handler → Primary (write operations)
+public class SubmitLessonProgressCommandHandler
+    : IRequestHandler<SubmitLessonProgressCommand, SubmitProgressResponse>
+{
+    private readonly GrapeseekWriteDbContext _writeDb; // ← Primary
+
+    public SubmitLessonProgressCommandHandler(GrapeseekWriteDbContext writeDb)
+        => _writeDb = writeDb;
+
+    public async Task<SubmitProgressResponse> Handle(
+        SubmitLessonProgressCommand command, CancellationToken ct)
+    {
+        var progress = new LessonProgress
+        {
+            StudentId = command.StudentId,
+            Unit = command.Unit,
+            LessonNumber = command.LessonNumber,
+            ScorePercent = command.ScorePercent,
+            IsCompleted = command.ScorePercent >= 70,
+            CompletedAt = DateTime.UtcNow
+        };
+        // Saves to Primary — replicated to read replicas asynchronously
+        _writeDb.LessonProgress.Add(progress);
+        await _writeDb.SaveChangesAsync(ct);
+        return new SubmitProgressResponse { IsCompleted = progress.IsCompleted };
+    }
+}
+```
+
+> **⚠️ Replication Lag:** Read replicas lag behind the primary by 50-200ms. If a teacher submits a grade and immediately views the class report, they might briefly see the old value. This is acceptable for Grapeseed's reporting features. For data that must be immediately consistent after a write (like the confirmation after quiz submission), read from the primary by using `GrapeseekWriteDbContext`.
+
+### RDS Proxy — Managing Connection Pools
+
+ECS Fargate Auto Scaling can create 50+ task instances. Each task has its own connection pool to RDS. At 50 tasks × 100 connections each = 5,000 connections. PostgreSQL on a `db.r6g.xlarge` handles about 3,000 connections before performance degrades.
+
+**AWS RDS Proxy** solves this: it pools connections at the AWS layer, so all your ECS tasks share a managed connection pool:
+
+```
+50 ECS Tasks × 100 connections = 5,000 connection requests to RDS Proxy
+RDS Proxy maintains only 200 actual connections to RDS
+
+ECS Task → RDS Proxy (connection multiplexing) → RDS PostgreSQL
+```
+
+Add RDS Proxy by changing only the connection string — no code changes needed:
+
+```
+# Before: Direct to RDS
+grapeseed-db.cluster-xxxx.ap-southeast-1.rds.amazonaws.com:5432
+
+# After: Via RDS Proxy
+grapeseed-db.proxy-xxxx.ap-southeast-1.rds.amazonaws.com:5432
+```
+
+---
+
+## 9. Async Processing with Amazon SQS
+
+Amazon SQS (Simple Queue Service) is a fully managed message queue. In Grapeseed, it decouples heavy or time-consuming work from the HTTP request path — keeping user-facing responses fast even when background work is slow.
+
+### Why SQS for Grapeseed?
+
+- **Managed by AWS:** No servers to run. No RabbitMQ cluster to maintain.
+- **Durable:** Messages persist in SQS until a consumer processes them. If the consumer ECS task is restarting, messages queue up safely.
+- **Scales automatically:** SQS handles any message volume without configuration.
+- **Dead Letter Queue (DLQ):** Messages that fail processing repeatedly go to a DLQ for investigation — no lost data.
+
+### Publishing to SQS
+
+```csharp
+// Install: dotnet add package AWSSDK.SQS
+//          dotnet add package Amazon.Extensions.NETCore.Setup
+
+// ─────────────────────────────────────────────────────────────────
+// Program.cs — Register AWS SQS client
+// ─────────────────────────────────────────────────────────────────
+builder.Services.AddAWSService<IAmazonSQS>();
+builder.Services.AddSingleton<IGrapeseekEventBus, SqsEventBus>();
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// SqsEventBus.cs — Publishing messages to SQS queues
+// ─────────────────────────────────────────────────────────────────
+public class SqsEventBus : IGrapeseekEventBus
+{
+    private readonly IAmazonSQS _sqsClient;
+    private readonly IConfiguration _configuration;
+    private readonly ILogger<SqsEventBus> _logger;
+
+    public SqsEventBus(IAmazonSQS sqsClient, IConfiguration configuration, ILogger<SqsEventBus> logger)
+    {
+        _sqsClient = sqsClient;
+        _configuration = configuration;
+        _logger = logger;
+    }
+
+    public async Task PublishAsync<T>(T message, string queueName, CancellationToken ct = default)
+        where T : class
+    {
+        var queueUrl = _configuration[$"AWS:SQS:Queues:{queueName}"];
+        var messageBody = JsonSerializer.Serialize(message);
+
+        var request = new SendMessageRequest
+        {
+            QueueUrl = queueUrl,
+            MessageBody = messageBody,
+            // Add message attributes for filtering and tracing
+            MessageAttributes = new Dictionary<string, MessageAttributeValue>
+            {
+                ["MessageType"] = new MessageAttributeValue
+                {
+                    DataType = "String",
+                    StringValue = typeof(T).Name
+                },
+                ["SchoolId"] = new MessageAttributeValue
+                {
+                    DataType = "String",
+                    StringValue = (message as ITenantMessage)?.SchoolId ?? "unknown"
+                }
+            }
+        };
+
+        var response = await _sqsClient.SendMessageAsync(request, ct);
+        _logger.LogInformation("Published {MessageType} to SQS. MessageId: {MessageId}",
+            typeof(T).Name, response.MessageId);
+    }
+}
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// MediatR Command Handler — uses SQS for fire-and-forget work
+// ─────────────────────────────────────────────────────────────────
+public class SubmitLessonProgressCommandHandler
+    : IRequestHandler<SubmitLessonProgressCommand, SubmitProgressResponse>
+{
+    private readonly GrapeseekWriteDbContext _db;
+    private readonly IGrapeseekEventBus _eventBus;
+
+    public async Task<SubmitProgressResponse> Handle(
+        SubmitLessonProgressCommand command,
+        CancellationToken ct)
+    {
+        // FAST PATH: Save progress to RDS (~10ms)
+        var progress = new LessonProgress
+        {
+            StudentId = command.StudentId,
+            Unit = command.Unit,
+            LessonNumber = command.LessonNumber,
+            ScorePercent = command.ScorePercent,
+            IsCompleted = command.ScorePercent >= 70,
+            CompletedAt = DateTime.UtcNow
+        };
+        _db.LessonProgress.Add(progress);
+        await _db.SaveChangesAsync(ct);
+
+        // ASYNC PATH: Publish event to SQS for background processing (~5ms to enqueue)
+        // This doesn't block the student from seeing their result.
+        // Even if the consumer is temporarily down, SQS holds the message safely.
+        await _eventBus.PublishAsync(new LessonCompletedMessage
+        {
+            SchoolId = command.SchoolId,
+            StudentId = command.StudentId,
+            Unit = command.Unit,
+            LessonNumber = command.LessonNumber,
+            ScorePercent = command.ScorePercent,
+            IsCompleted = progress.IsCompleted,
+            OccurredAt = progress.CompletedAt.Value
+        }, queueName: "lesson-completed", ct);
+
+        // Return result immediately — email/certificate/analytics happen in background
+        return new SubmitProgressResponse
+        {
+            IsCompleted = progress.IsCompleted,
+            ScorePercent = progress.ScorePercent,
+            Message = progress.IsCompleted
+                ? $"🎉 Congratulations! You passed Unit {command.Unit}, Lesson {command.LessonNumber}!"
+                : "Keep practicing! Review the lesson and try again."
+        };
+    }
+}
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// SqsConsumerBackgroundService.cs — Runs in the NotificationService ECS task
+// Reads from SQS and processes events using MediatR
+// ─────────────────────────────────────────────────────────────────
+public class SqsConsumerBackgroundService : BackgroundService
+{
+    private readonly IAmazonSQS _sqsClient;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly string _queueUrl;
+    private readonly ILogger<SqsConsumerBackgroundService> _logger;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("SQS Consumer started. Listening on queue: {QueueUrl}", _queueUrl);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            // Long-polling: waits up to 20 seconds for messages (reduces empty API calls)
+            var receiveRequest = new ReceiveMessageRequest
+            {
+                QueueUrl = _queueUrl,
+                MaxNumberOfMessages = 10,    // Process up to 10 messages per poll
+                WaitTimeSeconds = 20,        // Long-polling — efficient, reduces AWS cost
+                MessageAttributeNames = new List<string> { "All" }
+            };
+
+            var response = await _sqsClient.ReceiveMessageAsync(receiveRequest, stoppingToken);
+
+            foreach (var message in response.Messages)
+            {
+                await ProcessMessageAsync(message, stoppingToken);
+            }
+        }
+    }
+
+    private async Task ProcessMessageAsync(Message sqsMessage, CancellationToken ct)
+    {
+        // Create a new DI scope for each message (like a separate HTTP request)
+        using var scope = _serviceProvider.CreateScope();
+        var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
+
+        try
+        {
+            var lessonCompleted = JsonSerializer.Deserialize<LessonCompletedMessage>(sqsMessage.Body);
+            if (lessonCompleted is null) return;
+
+            // Use MediatR to dispatch to the appropriate notification handler
+            await mediator.Send(new SendLessonCompletionNotificationCommand(lessonCompleted), ct);
+
+            // Delete from SQS only after successful processing
+            await _sqsClient.DeleteMessageAsync(_queueUrl, sqsMessage.ReceiptHandle, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process SQS message {MessageId}. Will retry.", sqsMessage.MessageId);
+            // Don't delete — SQS will make it visible again after visibility timeout
+            // After N retries, SQS moves it to the Dead Letter Queue for investigation
+        }
     }
 }
 ```
 
 ---
 
-## 10. Rate Limiting — Protecting Your System from Overload
+## 10. Rate Limiting — Protecting Grapeseed from Overload
 
-Even with all the caching and scaling in the world, you need a **rate limiter** — a mechanism that limits how many requests a single client (user, IP, or tenant) can make in a given time window. This protects your system from:
-
-- A buggy client making thousands of requests per second (accidental DoS)
-- A student refreshing a page 100 times because they're anxious
-- A school running a bot to scrape all lesson content
-- A malicious actor trying to overwhelm your API
+Rate limiting ensures no single school, user, or misbehaving client can exhaust Grapeseed's resources.
 
 ```csharp
-// Install: Included in .NET 7+ via Microsoft.AspNetCore.RateLimiting
-
 // ─────────────────────────────────────────────────────────────────
-// Program.cs — Configuring Rate Limiting
+// Program.cs — Rate limiting configuration for Grapeseed
 // ─────────────────────────────────────────────────────────────────
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 
-    // Global rate limit: No single client can exceed 100 req/s across the whole API
+    // Global per-user rate limit: 200 requests per second
+    // Prevents any single user from overwhelming the API
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
     {
-        // Partition by authenticated user ID (or IP for anonymous requests)
+        // Partition by user ID (authenticated) or IP (anonymous)
         var userId = context.User?.FindFirst(ClaimTypes.NameIdentifier)?.Value
                      ?? context.Connection.RemoteIpAddress?.ToString()
-                     ?? "anonymous";
+                     ?? "anon";
 
         return RateLimitPartition.GetFixedWindowLimiter(userId, _ =>
             new FixedWindowRateLimiterOptions
             {
-                PermitLimit = 100,               // Max 100 requests...
-                Window = TimeSpan.FromSeconds(1), // ...per 1 second
+                PermitLimit = 200,                 // 200 requests...
+                Window = TimeSpan.FromSeconds(1),  // ...per second
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
-                QueueLimit = 5  // Allow 5 requests to queue before rejecting
+                QueueLimit = 20
             });
     });
 
-    // Specific limit for the quiz submission endpoint (prevent rapid resubmissions)
-    options.AddFixedWindowLimiter("quiz_submission", limiterOptions =>
+    // Per-school rate limit: no school can exceed 2,000 requests per second
+    // Prevents one large school from degrading performance for all others
+    options.AddFixedWindowLimiter("per-school", limiterOptions =>
     {
-        limiterOptions.PermitLimit = 5;             // Max 5 quiz submissions...
-        limiterOptions.Window = TimeSpan.FromMinutes(1); // ...per minute
+        limiterOptions.PermitLimit = 2000;
+        limiterOptions.Window = TimeSpan.FromSeconds(1);
     });
 
-    // Specific limit for video streaming (prevent bandwidth abuse)
-    options.AddTokenBucketLimiter("video_stream", limiterOptions =>
+    // Quiz submission: max 5 submissions per minute per student (prevent spam)
+    options.AddFixedWindowLimiter("quiz-submit", limiterOptions =>
     {
-        limiterOptions.TokenLimit = 10;           // Max 10 stream starts
-        limiterOptions.ReplenishmentPeriod = TimeSpan.FromMinutes(1);
-        limiterOptions.TokensPerPeriod = 3;       // Refill 3 tokens per minute
+        limiterOptions.PermitLimit = 5;
+        limiterOptions.Window = TimeSpan.FromMinutes(1);
+    });
+
+    // Report generation: max 10 per hour per teacher (reports are expensive)
+    options.AddTokenBucketLimiter("report-generate", limiterOptions =>
+    {
+        limiterOptions.TokenLimit = 10;
+        limiterOptions.ReplenishmentPeriod = TimeSpan.FromMinutes(6); // 10 per hour
+        limiterOptions.TokensPerPeriod = 1;
         limiterOptions.AutoReplenishment = true;
     });
 });
 
-// Register middleware
 var app = builder.Build();
 app.UseRateLimiter();
 ```
 
 ```csharp
-// Apply rate limiting to specific endpoints
-[HttpPost("{lessonId:int}/submit")]
-[EnableRateLimiting("quiz_submission")]  // Apply the quiz-specific rate limit
-public async Task<IActionResult> SubmitQuiz(int lessonId, SubmitQuizRequest request)
+// Apply specific limits to endpoints
+[HttpPost("{unit}/{lessonNumber:int}/submit")]
+[EnableRateLimiting("quiz-submit")]
+public async Task<IActionResult> SubmitLessonProgress(
+    string unit, int lessonNumber, SubmitProgressRequest request)
 {
-    // ...
+    var result = await _mediator.Send(new SubmitLessonProgressCommand(
+        unit, lessonNumber, request.ScorePercent));
+    return Ok(result);
+}
+
+[HttpPost("reports/class-progress")]
+[EnableRateLimiting("report-generate")]
+public async Task<IActionResult> GenerateClassReport(GenerateReportRequest request)
+{
+    var result = await _mediator.Send(new GenerateClassProgressReportCommand(request));
+    return Ok(result);
 }
 ```
 
+> **Note:** AWS WAF (Web Application Firewall) can also enforce rate limiting at the CloudFront layer, before requests even reach your ECS tasks. This is more cost-effective for blocking abusive clients at the edge.
+
 ---
 
-## 11. Background Jobs with Hangfire
+## 11. Background Jobs with Hangfire on AWS
 
-Some tasks need to run on a schedule (e.g., generate weekly progress reports) or be queued for reliable, persistent background processing. **Hangfire** is the most popular library for this in .NET.
-
-Unlike the fire-and-forget message queue approach, Hangfire stores jobs in a database. If the server crashes while processing a job, the job will be retried when the server comes back up.
+Hangfire provides persistent, reliable background job scheduling for Grapeseed. Unlike fire-and-forget SQS messages, Hangfire jobs are stored in a database — if the server crashes mid-execution, the job is retried automatically.
 
 ```csharp
 // Install: dotnet add package Hangfire.AspNetCore
-// Install: dotnet add package Hangfire.PostgreSql (or SqlServer)
+//          dotnet add package Hangfire.PostgreSql (for storing jobs in RDS)
 
 // ─────────────────────────────────────────────────────────────────
-// Program.cs — Hangfire setup
+// Program.cs — Hangfire with RDS PostgreSQL backend
 // ─────────────────────────────────────────────────────────────────
 builder.Services.AddHangfire(config => config
     .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
     .UseSimpleAssemblyNameTypeSerializer()
     .UseRecommendedSerializerSettings()
-    .UsePostgreSqlStorage(
-        builder.Configuration.GetConnectionString("HangfireDatabase")));
+    // Jobs are stored in a dedicated table in RDS PostgreSQL
+    // They survive ECS task restarts and redeployments
+    .UsePostgreSqlStorage(builder.Configuration["ConnectionStrings:HangfireDb"]));
 
 builder.Services.AddHangfireServer(options =>
 {
-    options.WorkerCount = 5; // 5 background worker threads
-    options.Queues = new[] { "critical", "default", "low" }; // Priority queues
+    options.WorkerCount = 5;
+    options.Queues = new[] { "critical", "default", "bulk" };
 });
 
 var app = builder.Build();
-
-// Optional: Hangfire Dashboard (password-protect this!)
+// Protect the dashboard — only accessible to platform admins
 app.UseHangfireDashboard("/hangfire", new DashboardOptions
 {
-    Authorization = new[] { new HangfireAdminAuthorizationFilter() }
+    Authorization = new[] { new HangfireAdminOnlyAuthFilter() }
 });
 
 // ─────────────────────────────────────────────────────────────────
-// Schedule recurring jobs at startup
+// Schedule recurring Grapeseed jobs at startup
 // ─────────────────────────────────────────────────────────────────
 using (var scope = app.Services.CreateScope())
 {
-    var recurringJobManager = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();
-    
-    // Generate weekly progress reports every Sunday at 2 AM UTC
-    recurringJobManager.AddOrUpdate<WeeklyReportJob>(
-        "weekly-progress-reports",
-        job => job.GenerateForAllTenantsAsync(),
-        Cron.Weekly(DayOfWeek.Sunday, hour: 2)
-    );
-    
-    // Clean up expired session tokens daily at 3 AM UTC
-    recurringJobManager.AddOrUpdate<TokenCleanupJob>(
-        "cleanup-expired-tokens",
-        job => job.CleanupAsync(),
-        Cron.Daily(hour: 3)
-    );
+    var scheduler = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();
+
+    // Weekly progress reports — every Monday at 7 AM UTC (2 PM Bangkok time)
+    scheduler.AddOrUpdate<WeeklyProgressReportJob>(
+        "grapeseed-weekly-reports",
+        job => job.GenerateForAllActiveSchoolsAsync(),
+        "0 7 * * MON",
+        TimeZoneInfo.Utc);
+
+    // Daily: sync Grapeseed curriculum updates from the content CDN
+    scheduler.AddOrUpdate<CurriculumSyncJob>(
+        "grapeseed-curriculum-sync",
+        job => job.SyncFromContentServiceAsync(),
+        Cron.Daily(hour: 3));
+
+    // Daily: expire inactive student sessions in ElastiCache
+    scheduler.AddOrUpdate<SessionCleanupJob>(
+        "grapeseed-session-cleanup",
+        job => job.CleanupExpiredSessionsAsync(),
+        Cron.Daily(hour: 4));
+
+    // Hourly: update ElastiCache with fresh school feature flag configs
+    // (in case a school upgraded their license)
+    scheduler.AddOrUpdate<SchoolConfigRefreshJob>(
+        "grapeseed-config-refresh",
+        job => job.RefreshAllSchoolConfigsAsync(),
+        Cron.Hourly());
 }
 ```
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// Jobs/WeeklyReportJob.cs
+// Jobs/WeeklyProgressReportJob.cs
+// Uses MediatR internally to dispatch report generation commands
 // ─────────────────────────────────────────────────────────────────
-public class WeeklyReportJob
+public class WeeklyProgressReportJob
 {
-    private readonly ITenantRepository _tenantRepo;
-    private readonly IProgressReportService _reportService;
-    private readonly IEmailService _emailService;
-    private readonly ILogger<WeeklyReportJob> _logger;
+    private readonly ISchoolRepository _schools;
+    private readonly IMediator _mediator;
+    private readonly ILogger<WeeklyProgressReportJob> _logger;
 
-    public WeeklyReportJob(/* ... inject services ... */) { /* ... */ }
-
-    // This method is stored in Hangfire's DB and executed in the background.
-    // If it fails, Hangfire retries it automatically (up to 10 times by default).
-    [AutomaticRetry(Attempts = 3, DelaysInSeconds = new[] { 60, 300, 900 })]
-    public async Task GenerateForAllTenantsAsync()
+    [AutomaticRetry(Attempts = 3, DelaysInSeconds = new[] { 300, 900, 3600 })]
+    public async Task GenerateForAllActiveSchoolsAsync()
     {
-        var tenants = await _tenantRepo.GetAllActiveTenantsAsync();
-        _logger.LogInformation("Generating weekly reports for {TenantCount} tenants", tenants.Count);
+        var schools = await _schools.GetAllActiveAsync();
+        _logger.LogInformation("Generating weekly reports for {Count} schools", schools.Count);
 
-        // Process tenants in parallel but limit concurrency to avoid DB overload
-        var semaphore = new SemaphoreSlim(10); // Max 10 concurrent report generations
-        var tasks = tenants.Select(async tenant =>
+        // Process schools in parallel but limit concurrency
+        // to avoid overwhelming RDS with simultaneous report queries
+        var semaphore = new SemaphoreSlim(10); // Max 10 concurrent reports
+        var tasks = schools.Select(async school =>
         {
             await semaphore.WaitAsync();
             try
             {
-                var report = await _reportService.GenerateWeeklyReportAsync(tenant.TenantId);
-                await _emailService.SendWeeklyReportAsync(tenant.AdminEmail, report);
-                _logger.LogInformation("Weekly report sent for tenant {TenantId}", tenant.TenantId);
+                // Dispatch to MediatR handler for clean separation of concerns
+                await _mediator.Send(new GenerateWeeklyReportCommand(school.SchoolId));
+                _logger.LogInformation("Weekly report complete for {SchoolId}", school.SchoolId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Weekly report failed for {SchoolId}", school.SchoolId);
+                // Don't rethrow — allow other schools' reports to complete
             }
             finally
             {
@@ -924,69 +1078,77 @@ public class WeeklyReportJob
 
 ---
 
-## 12. The Education Platform Scenario — Exam Day
+## 12. The Grapeseed Scenario — Exam Day
 
-Let's trace LinguaLearn's exam day scenario with all high-load patterns applied:
+With all high-load patterns applied, let's trace exam day:
 
 ```
-08:00:00 — 200,000 students simultaneously open the exam platform.
+08:00:00 — 180,000 students open Grapeseed simultaneously.
 
-LOAD BALANCER:
-- Round-robin distributes requests across 20 application server instances
-- Health checks confirm all 20 servers are alive
-- Auto-scaling policy detects CPU > 70% → starts 10 more instances
+SCHEDULED SCALING (pre-configured for Monday morning):
+- ECS tasks already pre-warmed to 15 instances since midnight
+- RDS Proxy connections pre-established
+- ElastiCache warmed up from previous day's traffic
 
-CDN LAYER (handles ~60% of requests):
-- Login page HTML/CSS/JS → served from CDN (Singapore/Jakarta/HCM City nodes)
-- Latency: 5-10ms. No application server needed.
+CLOUDFRONT (handles ~65% of requests):
+- Login page, CSS, JavaScript → served from nearest edge (Bangkok, Ho Chi Minh City, etc.)
+- Lesson images → served from CloudFront / S3
+- Latency: 8-15ms. No ECS task involved.
 
-RATE LIMITER:
-- Detects unusual spike → activates stricter per-IP rate limiting
-- Buggy student client making 500 req/s → blocked automatically (429)
+ALB + ECS AUTO SCALING:
+- Traffic spike detected. CPU average across tasks climbs to 80%.
+- ECS Auto Scaling triggers: adds 5 tasks every 60 seconds.
+- By 08:03, running 35 tasks. CPU stabilizes at 65%.
 
-LESSON LOADING (40% of requests reach app servers):
-- Each student loads their exam lesson page
-- Redis cache: 85% hit rate → lesson content served in ~2ms
-- 15% cache miss → DB read replica query → ~30ms → stored in Redis
+ELASTICACHE (handles ~80% of authenticated requests):
+- Student profiles: HIT (loaded by morning session)
+- Lesson content: HIT (CachingBehavior in MediatR pipeline)
+- School configs: HIT (30-minute TTL, loaded from previous day's sessions)
+- Cache response: ~1ms. RDS barely touched.
 
-QUIZ SUBMISSIONS (starting at 08:15):
-- Students submit quiz answers → synchronous: save + score (~15ms)
-- Async: "QuizCompleted" event published to RabbitMQ
-  - Email Service processes email queue (non-urgent, can lag)
-  - Certificate Service processes certificate queue (non-urgent)
-  - These are isolated from the fast path — even if they're slow, 
-    students still get their scores instantly
+MEDIATR PIPELINE:
+- Every lesson request: LoggingBehavior → TenantValidationBehavior → CachingBehavior → Handler
+- CachingBehavior: 85% HIT rate on lesson content
+- Only 15% of requests reach the Handler and query RDS Read Replica
 
-DATABASE:
-- Primary DB: receives only WRITE traffic (quiz submissions)
-- Read Replica 1 & 2: handle all READ traffic for lesson fetching
-- Connection pool: 100 connections per app server × 20 servers = 2,000 total
-  DB can handle this easily (PostgreSQL max_connections = 5,000)
+RDS (for the 15% of cache misses):
+- Read Replicas handle all SELECT queries (lesson content, student profiles)
+- Primary only receives writes (progress submissions)
+- RDS Proxy ensures stable connection count despite 35 ECS tasks
 
-08:30:00 — Traffic starts subsiding as students finish.
-- Auto-scaler detects CPU < 30% → starts terminating extra instances
-- System returns to baseline without manual intervention
+SQS (background processing):
+- Every quiz submission publishes "LessonCompleted" message to SQS
+- NotificationService processes email queue asynchronously
+- Students get their results in <100ms; emails arrive within 30-120 seconds
 
-RESULT: 200,000 students served. Average latency: 52ms. Zero downtime.
+08:30:00 — Traffic normalizes as most students finish their assessments.
+- ECS Auto Scaling begins scaling in (scale-in cooldown: 5 minutes)
+- By 09:00: back to 8 tasks
+- Cost for exam day extra capacity: ~$45 USD (2 hours × 20 extra tasks × Fargate pricing)
+
+RESULT:
+- 180,000 students served
+- Average latency: P50 = 48ms, P95 = 185ms, P99 = 620ms
+- Zero downtime. Zero manual intervention.
+- Platform admin sees green dashboards all morning.
 ```
 
 ---
 
 ## 13. Decision Guide
 
-| Technique | When to Apply | Cost |
-|-----------|--------------|------|
-| Vertical scaling | First response to capacity issues | Medium (hardware) |
-| Horizontal scaling | When vertical hits ceiling | Medium (infra + code changes) |
-| CDN | Always, from day 1 | Low |
-| In-memory cache | For stable reference data | Very low |
-| Redis distributed cache | When you have multiple servers | Low |
-| Read replicas | When DB reads are the bottleneck | Medium |
-| Sharding | Extreme scale (10,000+ writes/sec) | Very high |
-| Rate limiting | Always, to protect the system | Very low |
-| Message queues | For non-critical async operations | Low |
-| Background jobs | For scheduled/delayed work | Low |
-| Connection pooling | Always, built into most ORMs | Very low |
+| Technique | When to Apply | AWS Service |
+|-----------|--------------|------------|
+| CloudFront CDN | Always, from day 1 | Amazon CloudFront |
+| ECS Auto Scaling | From the start (configure min/max) | ECS Application Auto Scaling |
+| ElastiCache | Any data read more than once per minute | Amazon ElastiCache (Redis) |
+| MediatR CachingBehavior | Any query returning stable data | Works with ElastiCache |
+| RDS Read Replicas | When DB reads are the bottleneck | Amazon RDS |
+| RDS Proxy | When connection count is the bottleneck | Amazon RDS Proxy |
+| SQS Async Processing | For non-user-blocking background work | Amazon SQS |
+| Hangfire | For reliable scheduled/recurring jobs | Hangfire + RDS PostgreSQL |
+| Rate Limiting | Always, to protect the system | ASP.NET Core Rate Limiting |
+| AWS WAF | When you need edge-level blocking | AWS WAF + CloudFront |
 
 ---
 
@@ -996,34 +1158,26 @@ RESULT: 200,000 students served. Average latency: 52ms. Zero downtime.
 
 | Concept | One-Line Summary |
 |---------|-----------------|
-| Throughput (RPS) | How many requests the system processes per second |
-| Latency (P99) | How fast the slowest 1% of requests are served |
-| Availability (9s) | What percentage of time the system is operational |
-| Vertical scaling | Make one machine more powerful |
-| Horizontal scaling | Add more machines |
-| Load balancer | Routes traffic fairly across multiple servers |
-| CDN | Cache static content near users |
-| Redis | Distributed cache shared across all servers |
-| Read replica | Read-only database copy for scaling SELECT queries |
-| Sharding | Split data across multiple databases |
-| Rate limiter | Prevent any single client from overwhelming the system |
-| Message queue | Decouple expensive work from the fast HTTP request path |
-| Hangfire | Persistent background job scheduler |
+| ECS Auto Scaling | Automatically adds/removes Fargate tasks based on CPU/memory |
+| CloudFront | Cache static assets and video at the CDN edge — students get content from nearby |
+| ElastiCache | Shared Redis cache — lesson content, school configs, student profiles |
+| MediatR CachingBehavior | Automatic caching in the pipeline — handlers stay clean |
+| RDS Read Replicas | Offload 85% of read queries from the primary database |
+| RDS Proxy | Multiplex thousands of ECS connections into a manageable pool |
+| Amazon SQS | Durable async message queue — decouple background work from user requests |
+| Hangfire + RDS | Persistent scheduled jobs that survive restarts |
+| Rate Limiting | Per-user and per-school limits protect the platform from abuse |
 
-### The Golden Rules of High Load Systems
+### The Five Rules of High Load Engineering
 
-1. **Measure before you optimize** — Never guess where the bottleneck is. Use profiling tools.
-2. **Cache at every layer** — CDN → Redis → DB query cache. Each layer dramatically multiplies your capacity.
-3. **Make your application stateless** — Only stateless apps can be horizontally scaled.
-4. **Decouple with message queues** — Don't let slow background work slow down user-facing requests.
-5. **Rate limit everything** — A single misbehaving client should never take down the system.
+1. **Cache aggressively** — CloudFront + ElastiCache + MediatR CachingBehavior. Every cache hit is an RDS query you didn't need.
+2. **Scale horizontally on ECS** — Stateless tasks + ALB + Auto Scaling = elastic capacity.
+3. **Decouple with SQS** — Email, certificates, analytics: none of this should block the student's "lesson submitted" response.
+4. **Index your SchoolId** — Every query filters by SchoolId. Without a composite index, you're scanning millions of rows.
+5. **Prepare before the spike** — Use Scheduled Scaling for known exam days. Pre-warming is better than reacting.
 
-### What's Next
-
-You now know how to make a system handle massive load without collapsing. In the next chapter, we look at how to organize a large team and large codebase using microservices — so different teams can scale, deploy, and maintain their parts of the platform independently.
-
-*→ Continue to: [Chapter 4 — Microservices](./book_ch4_microservices.md)*
+*→ Continue to: [Chapter 4 — Microservices & MediatR](./book_ch4_microservices.md)*
 
 ---
 
-*Chapter 3 Complete · 14 sections · High Load Systems*
+*Chapter 3 Complete · 14 sections · High Load Systems on AWS*

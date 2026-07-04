@@ -1,7 +1,7 @@
 # Chapter 2: Multi-Tenant Architecture
 
-> **Advanced Architecture Pattern · Data Isolation · Enterprise SaaS**
-> *"Multi-tenancy is the art of serving many customers from one system, while making each customer feel like they have the system all to themselves."*
+> **Advanced Architecture Pattern · Data Isolation · Enterprise SaaS on AWS**
+> *"Multi-tenancy is the art of serving many schools from one system, while making each school feel like they have the platform all to themselves."*
 
 ---
 
@@ -10,40 +10,40 @@
 1. [Introduction — One Platform, Many Schools](#1-introduction)
 2. [What Is Multi-Tenancy?](#2-what-is-multi-tenancy)
 3. [The Three Tenancy Models](#3-tenancy-models)
-4. [Choosing the Right Model for LinguaLearn](#4-choosing-the-right-model)
+4. [Grapeseed's Choice — Hybrid Approach](#4-grapeseeds-choice)
 5. [Tenant Isolation — Beyond Just Data](#5-tenant-isolation)
 6. [Resolving the Tenant — Who Is Calling?](#6-resolving-the-tenant)
 7. [Propagating Tenant Context Through the Stack](#7-propagating-tenant-context)
 8. [EF Core Global Query Filters — Automatic Data Isolation](#8-ef-core-global-query-filters)
-9. [Row-Level Security in the Database](#9-row-level-security)
-10. [Tenant-Aware Feature Flags and Configuration](#10-tenant-aware-features)
-11. [The Education Platform Scenario](#11-education-platform-scenario)
-12. [Decision Guide — Which Model Should You Choose?](#12-decision-guide)
-13. [Summary and Key Takeaways](#13-summary)
+9. [MediatR Pipeline Behavior for Tenant Context](#9-mediatr-tenant-behavior)
+10. [Row-Level Security in PostgreSQL and SQL Server](#10-row-level-security)
+11. [Tenant-Aware Feature Flags and Configuration](#11-tenant-aware-features)
+12. [Storing Tenant Data on AWS](#12-aws-tenant-storage)
+13. [The Grapeseed Scenario](#13-grapeseed-scenario)
+14. [Decision Guide](#14-decision-guide)
+15. [Summary and Key Takeaways](#15-summary)
 
 ---
 
 ## 1. Introduction — One Platform, Many Schools
 
-Imagine you work at an apartment management company. You manage a hundred different apartment buildings. Each building has its own residents, its own rules, its own front desk staff, and its own maintenance requests.
+Imagine you run a franchise restaurant company. You have 300 restaurants in 20 countries. Each restaurant has its own staff, its own local menu adaptations, its own loyalty card members, and its own sales figures.
 
-Now, you could hire a separate management team for each building. That would be simple — each team only deals with their one building, and there's zero chance of confusing one building's residents with another's. But it's also wildly expensive and inefficient.
+You could run separate software for each restaurant. That's 300 software deployments to maintain. When you fix a bug, you fix it 300 times. When you release a new feature (online ordering), you deploy it 300 times. Clearly, that doesn't scale.
 
-Instead, your company manages all buildings from one central office, using shared staff, shared software, and shared processes. Each building's residents have their own private account, can only see their own building's information, and never even know that other buildings exist in the system. They each think they have a dedicated property manager.
+Instead, your company runs one central system. Each restaurant logs in and sees only their own staff, their own menu, their own customers. They don't know — and don't care — that 299 other restaurants share the same software. From their perspective, they have their own private system.
 
-**This is multi-tenancy.** In software terms:
-- Each school (or company) is a **tenant**
-- The central office is your **application**
-- Each tenant gets a completely isolated experience on the same shared infrastructure
+**This is multi-tenancy.** In Grapeseed's world:
+- Each school or school district is a **tenant**
+- Grapeseed is the central software
+- Every tenant gets a completely isolated experience on the same shared AWS infrastructure
 
-In LinguaLearn's case, we have hundreds of schools worldwide. Each school is a tenant that:
-- Has their own teachers and students
-- Has their own lesson content and curriculum
-- Has their own branding (logo, colors)
-- Has their own configuration (grading rules, language settings)
-- **Must never see any data from any other school**
-
-Building this correctly is the focus of this chapter.
+Each Grapeseed school tenant needs:
+- Their own students and teachers, completely isolated from other schools
+- Their own lesson assignments and curriculum pacing
+- Their own configuration (academic year settings, timezone, language settings)
+- Their own branding (school logo, school name in emails)
+- **Absolute guarantee that their data cannot leak to other schools**
 
 ---
 
@@ -51,9 +51,9 @@ Building this correctly is the focus of this chapter.
 
 **Multi-tenancy** is a software architecture where a single instance of an application serves multiple tenants (customers/organizations), with each tenant's data and configuration isolated from all others.
 
-### The Core Promise of Multi-Tenancy
+### The Core Promise
 
-No matter what happens in the application, these three guarantees must hold:
+No matter what happens, these three guarantees must hold:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -61,70 +61,66 @@ No matter what happens in the application, these three guarantees must hold:
 │                                                                   │
 │  1. DATA ISOLATION                                               │
 │     School A can never read or write School B's data.           │
-│     Not through bugs. Not through misconfiguration.              │
-│     Not through clever API manipulation.                         │
+│     Not through bugs. Not through API manipulation.             │
+│     Not through misconfigured IAM policies.                     │
 │                                                                   │
 │  2. CONFIGURATION ISOLATION                                      │
 │     Changing School A's settings never affects School B.         │
-│     Each school can independently configure their experience.    │
+│     Each school configures their own experience.                │
 │                                                                   │
 │  3. PERFORMANCE ISOLATION                                        │
-│     School A generating a huge report should not slow down       │
-│     the experience for students in School B.                     │
+│     School A running a heavy report export should not slow      │
+│     down the lesson experience for students in School B.        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### The Business Case
 
-Why go multi-tenant instead of deploying separate applications for each school?
+Why go multi-tenant instead of deploying separate Grapeseed instances for each school?
 
 | Concern | Separate Deployments | Multi-Tenant |
 |---------|---------------------|--------------|
-| Infra Cost | Very high (N servers for N tenants) | Low (shared resources) |
-| Deployment | N deployments per release | 1 deployment for all |
-| Bug fixes | Fix N times | Fix once |
-| Scaling | Scale each tenant separately | Scale the whole platform |
-| Onboarding new tenant | Set up new server, deploy, configure | Add a row to the DB |
+| AWS infrastructure cost | Very high (N ECS clusters, N RDS instances) | Low (shared) |
+| Deployment | N deployments per release | 1 deployment |
+| Bug fixes | Fix and deploy N times | Fix and deploy once |
+| Scaling | Scale each school separately | Scale the whole platform |
+| Onboard new school | Set up new AWS stack (hours/days) | Add a row to the DB (seconds) |
 | Security updates | Apply to N systems | Apply once |
 
-For a business serving 500 schools, multi-tenancy can reduce infrastructure costs by 80-90% and operational complexity by even more.
+For Grapeseed serving 300 schools, multi-tenancy can reduce AWS costs by 80-90% and reduce operational overhead by even more.
 
 ---
 
 ## 3. The Three Tenancy Models
 
-There is no single "correct" way to implement multi-tenancy. There are three fundamental approaches, each with different tradeoffs. Let's understand all three.
+There is no single "correct" way to implement multi-tenancy. There are three fundamental approaches, each with different tradeoffs.
 
 ### Model 1: Separate Database per Tenant (Siloed)
 
 Each tenant gets their own completely independent database.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│              Model 1: Separate Database per Tenant               │
-│                                                                   │
-│   Application (shared)                                           │
-│         │                                                         │
-│         ├──► Database: school_tokyo_db      ← School Tokyo       │
-│         ├──► Database: school_london_db     ← School London      │
-│         ├──► Database: school_sydney_db     ← School Sydney      │
-│         └──► Database: school_newyork_db   ← School New York    │
-└─────────────────────────────────────────────────────────────────┘
+Grapeseed Application (shared ECS service)
+         │
+         ├──► RDS PostgreSQL: school_bangkok_db
+         ├──► RDS PostgreSQL: school_toronto_db
+         ├──► RDS PostgreSQL: school_mumbai_db
+         └──► RDS SQL Server: school_district_nyc_db  (enterprise requirement)
 ```
 
 **✅ Pros:**
 - Maximum data isolation — databases are physically separate
-- Easy to give a tenant their own database backup and restore
-- Can move a high-value tenant to better hardware
-- Compliance with strict data residency laws (School Tokyo data stays in Japan)
+- Can comply with data residency laws (Bangkok school data stays in AWS ap-southeast-1)
+- Backups are per-tenant — easy point-in-time restore for one school
+- A slow query in one school's DB doesn't affect others
 
 **❌ Cons:**
-- Expensive — each database uses resources even when idle
-- Schema migrations must run N times (once per tenant database)
-- Connection pool complexity — you need different connection strings for different tenants
-- Not practical beyond ~100 tenants
+- Expensive — each RDS instance costs money even when idle
+- Schema migrations must run against every database separately
+- Connection management: your app needs to pick the right connection string per request
+- Not practical beyond ~100 schools (becomes an operational nightmare)
 
-**Best for:** Very high-value clients, regulated industries (healthcare, government), or when data residency laws mandate it.
+**Best for:** Grapeseed's largest enterprise school districts that have data sovereignty requirements or pay a premium license.
 
 ---
 
@@ -133,312 +129,272 @@ Each tenant gets their own completely independent database.
 One database, but each tenant gets their own schema (a namespace within the database).
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│           Model 2: Shared Database, Separate Schemas             │
-│                                                                   │
-│   One Database: lingualearn_db                                   │
-│         │                                                         │
-│         ├── Schema: tokyo_school                                 │
-│         │     ├── students table                                 │
-│         │     ├── lessons table                                  │
-│         │     └── progress table                                 │
-│         │                                                         │
-│         ├── Schema: london_school                                │
-│         │     ├── students table                                 │
-│         │     ├── lessons table                                  │
-│         │     └── progress table                                 │
-│         │                                                         │
-│         └── Schema: sydney_school                               │
-│               ├── students table                                 │
-│               ├── lessons table                                  │
-│               └── progress table                                 │
-└─────────────────────────────────────────────────────────────────┘
+One Database: grapeseed_db (RDS PostgreSQL)
+  │
+  ├── Schema: school_bangkok
+  │     ├── students
+  │     ├── lesson_progress
+  │     └── lesson_assignments
+  │
+  ├── Schema: school_toronto
+  │     ├── students
+  │     ├── lesson_progress
+  │     └── lesson_assignments
+  │
+  └── Schema: school_mumbai
+        ├── students
+        ├── lesson_progress
+        └── lesson_assignments
 ```
 
 **✅ Pros:**
-- Good data isolation — schemas act as namespaces
-- Easier to export one tenant's data
-- Can still run tenant-specific queries easily
+- Good isolation — schemas are namespaces
+- One RDS instance, lower cost than Model 1
+- Easy to dump/restore one tenant's schema
 
 **❌ Cons:**
-- Schema migrations must still run N times
-- Not practical beyond ~1,000 tenants
-- Supported differently across databases (PostgreSQL supports it well; MySQL less so)
+- Schema migrations still run N times (once per schema)
+- PostgreSQL supports this well; SQL Server supports it via schemas too, but tooling is less mature
+- Not practical beyond ~500-1,000 schools
 
-**Best for:** Mid-range SaaS with dozens to hundreds of tenants, especially when data export per tenant is common.
+**Best for:** Mid-range B2B SaaS with dozens to hundreds of tenants.
 
 ---
 
 ### Model 3: Shared Database, Shared Tables (Discriminator Column)
 
-One database, one set of tables for all tenants. Every row has a `TenantId` column that identifies which tenant it belongs to.
+One database, one set of tables for all tenants. Every row has a `SchoolId` column (the tenant discriminator).
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│          Model 3: Shared Database, Shared Tables                 │
-│                                                                   │
-│   One Database: lingualearn_db                                   │
-│   One Schema: public                                             │
-│                                                                   │
-│   Students Table:                                                │
-│   ┌──────────┬────────────┬──────────────────┬───────────────┐  │
-│   │ Id       │ TenantId   │ Name             │ Email         │  │
-│   ├──────────┼────────────┼──────────────────┼───────────────┤  │
-│   │ 1        │ tokyo      │ Yuki Tanaka      │ yuki@...      │  │
-│   │ 2        │ london     │ Emma Watson      │ emma@...      │  │
-│   │ 3        │ tokyo      │ Kenji Sato       │ kenji@...     │  │
-│   │ 4        │ sydney     │ Jack Ryan        │ jack@...      │  │
-│   └──────────┴────────────┴──────────────────┴───────────────┘  │
-│                                                                   │
-│   Every query MUST include WHERE TenantId = 'current_tenant'    │
-└─────────────────────────────────────────────────────────────────┘
+One Database: grapeseed_db (RDS PostgreSQL)
+One Schema: public
+
+Students Table:
+┌──────┬──────────────┬──────────────────┬────────────────────────┐
+│ Id   │ SchoolId     │ Name             │ Email                  │
+├──────┼──────────────┼──────────────────┼────────────────────────┤
+│ 1    │ school-bkk   │ Siriporn T.      │ siriporn@abc-school... │
+│ 2    │ school-tor   │ Emma Watson      │ emma@toronto-school... │
+│ 3    │ school-bkk   │ Somchai P.       │ somchai@abc-school...  │
+│ 4    │ school-mum   │ Priya Sharma     │ priya@mumbai-school... │
+└──────┴──────────────┴──────────────────┴────────────────────────┘
+
+Every query MUST include WHERE SchoolId = 'current_school'
 ```
 
 **✅ Pros:**
-- Lowest infrastructure cost — one database for everything
+- Lowest AWS cost — one RDS instance, one schema for potentially thousands of schools
 - Schema migrations run once for all tenants
-- Efficient for thousands or even millions of tenants
-- Simplest operational model
+- Simplest operational model — one database to monitor and back up
 
 **❌ Cons:**
-- **Catastrophic if the TenantId filter is ever forgotten** — one bug could expose all tenants' data
-- "Noisy neighbor" problem — one tenant's heavy queries can slow others
-- Cross-tenant reporting (for platform admins) requires careful design
+- **Catastrophic if a developer forgets the SchoolId filter** — one bug could expose all schools' data
+- "Noisy neighbor" — one school's heavy report can slow down query performance for others
+- Cross-tenant admin queries require bypassing the filter carefully
 
-**Best for:** High-volume SaaS with thousands of tenants, where cost efficiency matters most.
-
-> **LinguaLearn's Choice:** We'll use **Model 3** (shared tables with TenantId) as our primary model in this chapter. It's the most common in real-world SaaS platforms and the most important to understand. We'll show how to make the TenantId filter automatic so it can never be forgotten.
+**Best for:** The core Grapeseed platform serving the majority of standard schools.
 
 ---
 
-## 4. Choosing the Right Model for LinguaLearn
+## 4. Grapeseed's Choice — Hybrid Approach
 
-LinguaLearn serves schools worldwide. Here's how to think about the choice:
+Grapeseed uses a **hybrid of Model 1 and Model 3**:
 
 ```
-                Start Here
-                     │
-         ┌───────────┴───────────┐
-         │  Does the school have │
-         │  strict data residency│
-         │  requirements?        │
-         └───────────┬───────────┘
-                     │
-          ┌──────────┴──────────┐
-         YES                    NO
-          │                      │
-   Separate Database        ┌────┴────────────────┐
-   per Tenant (Model 1)     │ Is this a very high  │
-   or per Region            │ value enterprise     │
-                            │ client (paying 10x)? │
-                            └────┬────────────────┘
-                                 │
-                      ┌──────────┴──────────┐
-                     YES                    NO
-                      │                      │
-               Separate Schema          Shared Tables
-               per Tenant (Model 2)     with TenantId
-                                        (Model 3) ← Most schools
+Standard schools (Model 3 — Shared Tables):
+  ├── 95% of schools
+  ├── Cost-efficient
+  └── Uses PostgreSQL on a shared RDS cluster
+
+Enterprise/Government districts (Model 1 — Separate DB):
+  ├── 5% of schools — premium accounts
+  ├── Own RDS PostgreSQL or SQL Server instance
+  ├── Own AWS region (for data residency compliance)
+  └── Connected by a separate connection string resolved at runtime
 ```
 
-**Decision for LinguaLearn:**
-- Standard schools → **Model 3** (shared tables, efficient, cheap)
-- Premium enterprise schools with compliance requirements → **Model 1** (own database)
-- This is called a **hybrid approach** — most SaaS platforms end up here
+The application code handles both through **dynamic connection string resolution**: the tenant resolution middleware determines which database connection to use for each request. For most schools, it uses the shared cluster. For premium schools, it connects to their dedicated RDS instance.
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// TenantConnectionResolver.cs — Dynamic connection string resolution
+// ─────────────────────────────────────────────────────────────────
+public class TenantConnectionResolver : ITenantConnectionResolver
+{
+    private readonly IDistributedCache _cache;
+    private readonly AmazonSecretsManagerClient _secretsManager;
+
+    public async Task<string> ResolveConnectionStringAsync(string schoolId)
+    {
+        // Check cache first — we don't want to hit Secrets Manager on every request
+        var cacheKey = $"tenant_conn:{schoolId}";
+        var cached = await _cache.GetStringAsync(cacheKey);
+        if (cached is not null) return cached;
+
+        // Check if this is a dedicated-database school (premium tier)
+        // If yes, load their own connection string from Secrets Manager
+        var secretName = $"grapeseed/schools/{schoolId}/db-connection";
+        try
+        {
+            var response = await _secretsManager.GetSecretValueAsync(
+                new GetSecretValueRequest { SecretId = secretName });
+
+            var connectionString = response.SecretString;
+
+            // Cache for 5 minutes — connection strings don't change often
+            await _cache.SetStringAsync(cacheKey, connectionString,
+                new DistributedCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
+                });
+
+            return connectionString;
+        }
+        catch (ResourceNotFoundException)
+        {
+            // No school-specific secret → use the shared cluster connection string
+            return _configuration["ConnectionStrings:SharedGrapeseekDb"];
+        }
+    }
+}
+```
 
 ---
 
 ## 5. Tenant Isolation — Beyond Just Data
 
-When people think about multi-tenancy, they usually think about database isolation. But true tenant isolation is much broader:
+True tenant isolation in Grapeseed covers multiple dimensions:
 
-### 1. Data Isolation
-The obvious one — School A's students are never visible to School B's queries.
+### Data Isolation
+Students, progress records, lesson assignments, teacher accounts — all scoped by `SchoolId`.
 
-### 2. Configuration Isolation
-Each school can have its own settings:
-- Lesson difficulty progression rules
-- Grading scale (A/B/C vs 1-10 vs pass/fail)
-- Enabled languages (English only, or English+Mandarin)
-- Feature flags (is the quiz module enabled for this school?)
-- Notification preferences
+### Configuration Isolation
+Each school configures their own experience:
+- Grapeseed unit pacing (how quickly students should progress through units)
+- Academic year start/end dates
+- Timezone (Asia/Bangkok vs. America/Toronto)
+- Which Grapeseed units are licensed (some schools license Units 1-6, others Units 1-12)
+- Notification preferences (email reports weekly vs. daily)
 
-### 3. Feature Isolation
-Premium schools might have access to features that free-tier schools don't:
-- Live video classes
-- AI-powered pronunciation feedback
-- Advanced analytics dashboard
-- Custom lesson builder
+### Feature Isolation
+Different Grapeseed license tiers unlock different features:
+- **Basic:** Core lessons, quizzes, teacher dashboard
+- **Standard:** + Progress reports, parent access, SIS integration
+- **Premium:** + Live coaching sessions, AI pronunciation analysis, advanced analytics
 
-### 4. Branding Isolation
-Each school sees their own branding:
-- School logo and colors
-- Custom domain (`learn.tokyoenglishschool.com`)
-- Custom email footer with school contact info
+### Branding Isolation
+Each school sees:
+- Their school name and logo on all pages and emails
+- Their primary accent color on the platform
+- Their administrative contact in the email footer
+- Optional: their own subdomain (`bangkok.grapeseed.com`)
 
-### 5. Performance Isolation
-One school running a massive report export shouldn't slow down other schools' lesson delivery. This can be achieved through:
-- Rate limiting per tenant
-- Separate job queues for heavy operations
-- Tenant-aware resource budgets
+### Performance Isolation
+One school running a massive CSV export should not slow down students in another school. Achieved via:
+- Per-school rate limiting
+- Heavy background jobs go to a separate SQS queue with lower priority
+- Large reports run on the Analytics Service (separate from the lesson-serving path)
 
 ---
 
 ## 6. Resolving the Tenant — Who Is Calling?
 
-Before your application can enforce any isolation, it needs to answer: **which tenant is making this request?**
+Before enforcing any isolation, the application must answer: **which school is this request for?**
 
-This is called **tenant resolution**. There are several strategies:
+### Strategy A: JWT Claim-Based Resolution (Primary)
 
-### Strategy A: Subdomain-Based Resolution
-
-Each school gets their own subdomain:
-- `tokyo.lingualearn.com`
-- `london.lingualearn.com`
-- `sydney.lingualearn.com`
-
-The middleware extracts the subdomain from the incoming request's `Host` header.
-
-**✅ Best for:** User-facing apps where branding matters. Each school sees a custom URL.
-
-### Strategy B: JWT Claim-Based Resolution
-
-After the user logs in, the JWT access token contains a `tenant_id` claim:
+After a user logs in, the JWT access token contains a `school_id` claim:
 
 ```json
 {
-  "sub": "user-456",
-  "email": "yuki@tokyoschool.com",
-  "tenant_id": "tokyo-school-001",
+  "sub": "user-789",
+  "email": "siriporn@abc-school.th",
+  "school_id": "school-bkk-001",
   "role": "student",
   "exp": 1751234567
 }
 ```
 
-Every API request carries this JWT. The middleware reads the `tenant_id` from the validated token.
+Every API call carries this JWT. The middleware reads `school_id` from the validated token. Secure — users cannot fake claims in a properly signed JWT.
 
-**✅ Best for:** API-first systems. Secure because the tenant ID is inside a signed token — users can't fake it.
+### Strategy B: Subdomain-Based Resolution (For Login Page)
 
-### Strategy C: API Key / Header-Based Resolution
-
-Service-to-service calls include a `X-Tenant-Id` header. Useful for internal microservices.
-
-**✅ Best for:** Internal service communication where the calling service is trusted.
+Each school gets a subdomain: `bangkok.grapeseed.com`, `toronto.grapeseed.com`. The middleware extracts the subdomain from the `Host` header before the user is logged in.
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// TenantResolutionMiddleware.cs
-// Resolves tenant from JWT claims (the recommended approach for LinguaLearn)
+// TenantResolutionMiddleware.cs — Resolves the current school/tenant
 // ─────────────────────────────────────────────────────────────────
 public class TenantResolutionMiddleware
 {
     private readonly RequestDelegate _next;
 
-    public TenantResolutionMiddleware(RequestDelegate next)
-    {
-        _next = next;
-    }
+    public TenantResolutionMiddleware(RequestDelegate next) => _next = next;
 
     public async Task InvokeAsync(HttpContext context, ITenantContext tenantContext)
     {
-        // Strategy 1: Try to resolve from JWT claim (for authenticated endpoints)
+        // Strategy 1: JWT claim (for authenticated API requests)
         if (context.User.Identity?.IsAuthenticated == true)
         {
-            var tenantIdClaim = context.User.FindFirst("tenant_id");
-            if (tenantIdClaim is not null)
+            var schoolIdClaim = context.User.FindFirst("school_id");
+            if (schoolIdClaim is not null)
             {
-                tenantContext.SetTenant(tenantIdClaim.Value);
+                await tenantContext.SetTenantAsync(schoolIdClaim.Value);
                 await _next(context);
                 return;
             }
         }
 
-        // Strategy 2: Try to resolve from subdomain (for login page)
-        var host = context.Request.Host.Host; // e.g., "tokyo.lingualearn.com"
-        var parts = host.Split('.');
-        if (parts.Length >= 3) // subdomain.domain.tld
+        // Strategy 2: Subdomain (for login page, before JWT exists)
+        var host = context.Request.Host.Host; // "bangkok.grapeseed.com"
+        var subdomain = host.Split('.')[0];    // "bangkok"
+        if (!string.IsNullOrEmpty(subdomain) && subdomain != "www" && subdomain != "api")
         {
-            var subdomain = parts[0]; // "tokyo"
-            tenantContext.SetTenantBySubdomain(subdomain);
+            await tenantContext.SetTenantBySubdomainAsync(subdomain);
             await _next(context);
             return;
         }
 
-        // Strategy 3: Try X-Tenant-Id header (for service-to-service)
-        if (context.Request.Headers.TryGetValue("X-Tenant-Id", out var headerTenantId))
+        // Strategy 3: X-School-Id header (for internal service-to-service calls)
+        if (context.Request.Headers.TryGetValue("X-School-Id", out var headerSchoolId))
         {
-            tenantContext.SetTenant(headerTenantId.ToString());
+            await tenantContext.SetTenantAsync(headerSchoolId.ToString());
             await _next(context);
             return;
         }
 
-        // If we can't determine the tenant, return 400 Bad Request
         context.Response.StatusCode = StatusCodes.Status400BadRequest;
-        await context.Response.WriteAsync("Unable to determine tenant from request.");
+        await context.Response.WriteAsJsonAsync(new { error = "Could not determine school from request." });
     }
 }
 ```
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// ITenantContext.cs — The tenant context that flows through the app
+// ITenantContext.cs — The school context that flows through the app
 // ─────────────────────────────────────────────────────────────────
 public interface ITenantContext
 {
-    string TenantId { get; }
-    TenantInfo? TenantInfo { get; }
-    void SetTenant(string tenantId);
-    void SetTenantBySubdomain(string subdomain);
+    string SchoolId { get; }
+    SchoolInfo? SchoolInfo { get; }
     bool IsResolved { get; }
+    Task SetTenantAsync(string schoolId);
+    Task SetTenantBySubdomainAsync(string subdomain);
 }
 
-public class TenantContext : ITenantContext
+public class SchoolInfo
 {
-    private readonly ITenantRepository _tenantRepository;
-
-    public string TenantId { get; private set; } = string.Empty;
-    public TenantInfo? TenantInfo { get; private set; }
-    public bool IsResolved { get; private set; }
-
-    public TenantContext(ITenantRepository tenantRepository)
-    {
-        _tenantRepository = tenantRepository;
-    }
-
-    public void SetTenant(string tenantId)
-    {
-        TenantId = tenantId;
-        // Optionally load full tenant info from cache/DB
-        TenantInfo = _tenantRepository.GetTenantInfo(tenantId);
-        IsResolved = true;
-    }
-
-    public void SetTenantBySubdomain(string subdomain)
-    {
-        // Look up the tenantId from the subdomain in a subdomain mapping table
-        var tenantId = _tenantRepository.GetTenantIdBySubdomain(subdomain);
-        if (tenantId is not null)
-        {
-            SetTenant(tenantId);
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────
-// TenantInfo.cs — Rich information about the tenant
-// ─────────────────────────────────────────────────────────────────
-public class TenantInfo
-{
-    public string TenantId { get; set; } = string.Empty;
-    public string Name { get; set; } = string.Empty;           // "Tokyo English Academy"
-    public string Subdomain { get; set; } = string.Empty;     // "tokyo"
-    public string PlanType { get; set; } = string.Empty;      // "premium", "standard", "free"
-    public string TimeZone { get; set; } = "UTC";              // "Asia/Tokyo"
-    public string DefaultLanguage { get; set; } = "en";
+    public string SchoolId { get; set; } = string.Empty;
+    public string SchoolName { get; set; } = string.Empty;       // "Bangkok English Academy"
+    public string Subdomain { get; set; } = string.Empty;        // "bangkok"
+    public string LicenseTier { get; set; } = "standard";        // "basic", "standard", "premium"
+    public string TimeZone { get; set; } = "UTC";                 // "Asia/Bangkok"
+    public int LicensedUnitsCount { get; set; } = 6;             // How many Grapeseed units they have
+    public string PrimaryColor { get; set; } = "#1A6B3A";        // Grapeseed green by default
     public string LogoUrl { get; set; } = string.Empty;
-    public string PrimaryColor { get; set; } = "#007BFF";
-    public bool IsActive { get; set; } = true;
-    public Dictionary<string, bool> Features { get; set; } = new(); // Feature flags
+    public string AwsRegion { get; set; } = "ap-southeast-1";    // Where this school's data lives
+    public bool HasDedicatedDatabase { get; set; } = false;       // Premium schools only
+    public Dictionary<string, bool> Features { get; set; } = new();
 }
 ```
 
@@ -446,76 +402,42 @@ public class TenantInfo
 
 ## 7. Propagating Tenant Context Through the Stack
 
-Once the middleware resolves the tenant, every part of the application needs access to `ITenantContext`. In ASP.NET Core, this is done through **Dependency Injection with a Scoped lifetime**.
+Once resolved, `ITenantContext` must be available everywhere in the request pipeline. In ASP.NET Core, register it as **Scoped** — one instance per HTTP request. Every service in the same request gets the same `ITenantContext`.
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// Program.cs — Registering tenant context as Scoped
+// Program.cs — Tenant context registration
 // ─────────────────────────────────────────────────────────────────
-
-var builder = WebApplication.CreateBuilder(args);
-
-// TenantContext is SCOPED: one instance per HTTP request
-// This means every service injected in the same request gets the SAME TenantContext
 builder.Services.AddScoped<ITenantContext, TenantContext>();
-builder.Services.AddScoped<ITenantRepository, TenantRepository>();
+builder.Services.AddScoped<ITenantConnectionResolver, TenantConnectionResolver>();
 
-// ... other services ...
+// Register the DbContext as Scoped so it picks up the TenantContext
+builder.Services.AddDbContext<GrapeseekDbContext>(ServiceLifetime.Scoped);
 
 var app = builder.Build();
 
-// Register middleware BEFORE routing so tenant is resolved for all requests
+// Middleware order matters: tenant resolution before controllers
 app.UseMiddleware<TenantResolutionMiddleware>();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
-
-app.Run();
-```
-
-Now any service can get the current tenant just by injecting `ITenantContext`:
-
-```csharp
-// ─────────────────────────────────────────────────────────────────
-// LessonService.cs — Tenant-aware business logic
-// ─────────────────────────────────────────────────────────────────
-public class LessonService : ILessonService
-{
-    private readonly ILessonRepository _repository;
-    private readonly ITenantContext _tenantContext;
-
-    public LessonService(ILessonRepository repository, ITenantContext tenantContext)
-    {
-        _repository = repository;
-        _tenantContext = tenantContext;
-    }
-
-    public async Task<IEnumerable<Lesson>> GetAllLessonsAsync()
-    {
-        // The tenantContext.TenantId is automatically resolved from the request.
-        // Every call to the repository will be scoped to this tenant.
-        return await _repository.GetLessonsForTenantAsync(_tenantContext.TenantId);
-    }
-}
 ```
 
 ---
 
 ## 8. EF Core Global Query Filters — Automatic Data Isolation
 
-Here is the most dangerous aspect of the shared-table model: **every database query must include a `WHERE TenantId = @currentTenantId` clause.** If a developer forgets to add this filter — even once — they could expose all tenants' data to the wrong school.
+This is the most critical safety mechanism for shared-table multi-tenancy. Without it, one developer forgetting to add `WHERE SchoolId = @schoolId` could expose all schools' data.
 
-This is a human error waiting to happen. The solution is to make the filter **automatic** using **EF Core Global Query Filters**. This feature lets you define a filter at the entity level that is automatically applied to every query involving that entity. Developers don't need to think about it.
+**EF Core Global Query Filters** automatically append a `WHERE` clause to every query on a filtered entity. Developers write normal queries — the filter is added invisibly and automatically.
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// Entities — all tenant-scoped entities have TenantId
+// Domain entities — all tenant-scoped entities inherit from TenantEntity
 // ─────────────────────────────────────────────────────────────────
-
-// Base class for all tenant-scoped entities
 public abstract class TenantEntity
 {
-    public string TenantId { get; set; } = string.Empty;
+    public string SchoolId { get; set; } = string.Empty;
 }
 
 public class Student : TenantEntity
@@ -523,48 +445,47 @@ public class Student : TenantEntity
     public int Id { get; set; }
     public string Name { get; set; } = string.Empty;
     public string Email { get; set; } = string.Empty;
+    public string CurrentUnit { get; set; } = "Unit 1";
     public string Level { get; set; } = "Beginner";
     public DateTime EnrolledAt { get; set; }
-    
-    // Navigation properties
     public ICollection<LessonProgress> Progress { get; set; } = new List<LessonProgress>();
 }
 
-public class Lesson : TenantEntity
+public class LessonAssignment : TenantEntity
 {
     public int Id { get; set; }
-    public string Title { get; set; } = string.Empty;
-    public string Content { get; set; } = string.Empty;
-    public int Unit { get; set; }
-    public string Level { get; set; } = "Beginner";
-    public string VideoId { get; set; } = string.Empty;
+    public string Unit { get; set; } = string.Empty;          // e.g., "Unit 3"
+    public int LessonNumber { get; set; }
+    public DateTime DueDate { get; set; }
+    public bool IsRequired { get; set; }
 }
 
 public class LessonProgress : TenantEntity
 {
     public int Id { get; set; }
     public int StudentId { get; set; }
-    public int LessonId { get; set; }
+    public string Unit { get; set; } = string.Empty;
+    public int LessonNumber { get; set; }
     public bool IsCompleted { get; set; }
     public int ScorePercent { get; set; }
-    public DateTime CompletedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
 }
 ```
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// ApplicationDbContext.cs — The HEART of multi-tenant isolation
+// GrapeseekDbContext.cs — EF Core with automatic tenant isolation
 // ─────────────────────────────────────────────────────────────────
-public class ApplicationDbContext : DbContext
+public class GrapeseekDbContext : DbContext
 {
     private readonly ITenantContext _tenantContext;
 
     public DbSet<Student> Students => Set<Student>();
-    public DbSet<Lesson> Lessons => Set<Lesson>();
+    public DbSet<LessonAssignment> LessonAssignments => Set<LessonAssignment>();
     public DbSet<LessonProgress> LessonProgress => Set<LessonProgress>();
 
-    public ApplicationDbContext(
-        DbContextOptions<ApplicationDbContext> options,
+    public GrapeseekDbContext(
+        DbContextOptions<GrapeseekDbContext> options,
         ITenantContext tenantContext) : base(options)
     {
         _tenantContext = tenantContext;
@@ -572,185 +493,433 @@ public class ApplicationDbContext : DbContext
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        // ✨ THE MAGIC: Global Query Filters
-        // This filter is automatically applied to EVERY query on these entities.
-        // Developers cannot forget it — it's always there.
+        // ✨ AUTOMATIC TENANT ISOLATION
+        // These filters are added to every query on these entities.
+        // A developer writing:
+        //   _db.Students.ToListAsync()
+        // Gets SQL:
+        //   SELECT * FROM Students WHERE SchoolId = 'school-bkk-001'
+        // They cannot accidentally forget the filter — it's always there.
         
         modelBuilder.Entity<Student>()
-            .HasQueryFilter(s => s.TenantId == _tenantContext.TenantId);
+            .HasQueryFilter(s => s.SchoolId == _tenantContext.SchoolId);
 
-        modelBuilder.Entity<Lesson>()
-            .HasQueryFilter(l => l.TenantId == _tenantContext.TenantId);
+        modelBuilder.Entity<LessonAssignment>()
+            .HasQueryFilter(a => a.SchoolId == _tenantContext.SchoolId);
 
         modelBuilder.Entity<LessonProgress>()
-            .HasQueryFilter(p => p.TenantId == _tenantContext.TenantId);
+            .HasQueryFilter(p => p.SchoolId == _tenantContext.SchoolId);
 
-        // Add indexes — CRITICAL for performance with shared tables.
-        // All queries filter by TenantId, so it must be indexed!
+        // ─────────────────────────────────────────────────────────
+        // PERFORMANCE CRITICAL: Index on SchoolId
+        // Every query filters by SchoolId. Without an index, every
+        // query scans the entire Students table (millions of rows
+        // across all schools). With the index, queries only scan
+        // the rows for the current school.
+        // ─────────────────────────────────────────────────────────
         modelBuilder.Entity<Student>()
-            .HasIndex(s => new { s.TenantId, s.Email }).IsUnique();
+            .HasIndex(s => new { s.SchoolId, s.Email }).IsUnique();
 
-        modelBuilder.Entity<Lesson>()
-            .HasIndex(l => new { l.TenantId, l.Unit, l.Level });
+        modelBuilder.Entity<Student>()
+            .HasIndex(s => new { s.SchoolId, s.CurrentUnit });
 
         modelBuilder.Entity<LessonProgress>()
-            .HasIndex(p => new { p.TenantId, p.StudentId });
+            .HasIndex(p => new { p.SchoolId, p.StudentId });
+
+        modelBuilder.Entity<LessonAssignment>()
+            .HasIndex(a => new { a.SchoolId, a.DueDate });
     }
 
     // ─────────────────────────────────────────────────────────────
-    // Override SaveChangesAsync to auto-set TenantId on new entities
-    // This ensures TenantId is always set correctly on INSERT
+    // Auto-set SchoolId on every INSERT
+    // Developers don't need to remember to set entity.SchoolId —
+    // it's set automatically from the current TenantContext.
     // ─────────────────────────────────────────────────────────────
-    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    public override async Task<int> SaveChangesAsync(CancellationToken ct = default)
     {
-        // Find all newly added TenantEntity objects
-        var tenantEntities = ChangeTracker
-            .Entries<TenantEntity>()
-            .Where(e => e.State == EntityState.Added);
-
-        // Automatically assign the current tenant's ID
-        foreach (var entry in tenantEntities)
+        foreach (var entry in ChangeTracker.Entries<TenantEntity>()
+                     .Where(e => e.State == EntityState.Added))
         {
-            if (string.IsNullOrEmpty(entry.Entity.TenantId))
+            if (string.IsNullOrEmpty(entry.Entity.SchoolId))
             {
-                entry.Entity.TenantId = _tenantContext.TenantId;
+                entry.Entity.SchoolId = _tenantContext.SchoolId;
             }
         }
 
-        return await base.SaveChangesAsync(cancellationToken);
+        return await base.SaveChangesAsync(ct);
     }
 }
 ```
 
-With this setup, here's what happens when a developer writes a query:
-
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// StudentRepository.cs — Simple queries, automatic tenant isolation
+// StudentRepository.cs — Simple, safe queries thanks to global filters
 // ─────────────────────────────────────────────────────────────────
 public class StudentRepository : IStudentRepository
 {
-    private readonly ApplicationDbContext _db;
+    private readonly GrapeseekDbContext _db;
 
-    public StudentRepository(ApplicationDbContext db)
-    {
-        _db = db;
-    }
+    public StudentRepository(GrapeseekDbContext db) => _db = db;
 
-    // This LOOKS like it's fetching all students, but the Global Query Filter
-    // automatically adds "WHERE TenantId = @currentTenant" to the SQL.
-    // The developer doesn't need to think about it!
-    public async Task<List<Student>> GetAllStudentsAsync()
-    {
-        // Generated SQL: SELECT * FROM Students WHERE TenantId = 'tokyo-school-001'
-        return await _db.Students.ToListAsync();
-    }
+    // This looks like "get all students" but the query filter automatically
+    // makes it "get all students WHERE SchoolId = @currentSchool"
+    // Generated SQL: SELECT * FROM Students WHERE SchoolId = 'school-bkk-001'
+    public async Task<List<Student>> GetAllAsync()
+        => await _db.Students.ToListAsync();
 
-    // Same here — only this tenant's students will be searched
-    public async Task<Student?> FindByEmailAsync(string email)
-    {
-        // Generated SQL: SELECT TOP 1 * FROM Students 
-        //                WHERE TenantId = 'tokyo-school-001' AND Email = @email
-        return await _db.Students.FirstOrDefaultAsync(s => s.Email == email);
-    }
-
-    // Even complex queries are automatically scoped
-    public async Task<List<Student>> GetStudentsByLevelAsync(string level)
-    {
-        return await _db.Students
-            .Where(s => s.Level == level)
-            .Include(s => s.Progress)  // Related entities are also filtered!
-            .OrderBy(s => s.Name)
+    // Generated SQL: SELECT * FROM Students 
+    //               WHERE SchoolId = 'school-bkk-001' AND CurrentUnit = @unit
+    public async Task<List<Student>> GetByUnitAsync(string unit)
+        => await _db.Students
+            .Where(s => s.CurrentUnit == unit)
+            .Include(s => s.Progress)  // Also filtered by SchoolId automatically
             .ToListAsync();
+
+    // Creating a new student: SchoolId is auto-set in SaveChangesAsync override
+    public async Task<Student> CreateAsync(Student student)
+    {
+        _db.Students.Add(student);
+        await _db.SaveChangesAsync();
+        return student;
     }
 }
 ```
 
-> **⚠️ Important Edge Case:** Sometimes platform administrators (not school users) need to query across all tenants — for example, to generate a platform-wide analytics report. EF Core allows you to bypass the query filter with `.IgnoreQueryFilters()`:
->
+> **⚠️ Admin Override:** Platform administrators need to query across all schools for monitoring. Use `.IgnoreQueryFilters()` very carefully, wrapped in a service that requires `PlatformAdmin` role:
 > ```csharp
-> // Only for admin operations! Guard this carefully.
-> var allStudentsAcrossAllTenants = await _db.Students
->     .IgnoreQueryFilters()  // Bypasses the TenantId filter
->     .CountAsync();
+> // ADMIN ONLY — never expose this to school-level code paths
+> var totalStudentsAllSchools = await _db.Students.IgnoreQueryFilters().CountAsync();
 > ```
-> Wrap this in a service that requires a special `Administrator` role so developers can't accidentally use it.
 
 ---
 
-## 9. Row-Level Security in the Database
+## 9. MediatR Pipeline Behavior for Tenant Context
 
-EF Core's global query filters are enforced at the application layer — they only work if all database access goes through EF Core. But what if:
+This is where MediatR becomes extremely powerful for multi-tenancy. You can add a **pipeline behavior** that automatically validates and enriches the tenant context for every MediatR command and query — without touching the handlers themselves.
 
-- A developer writes raw SQL and forgets the TenantId filter?
-- A different application connects directly to the database?
-- A data migration script runs without going through EF Core?
+### What Is a MediatR Pipeline Behavior?
 
-For an extra layer of protection, you can enforce tenant isolation at the **database level** using **Row-Level Security (RLS)**. RLS is a feature in PostgreSQL and SQL Server that prevents certain rows from being returned, regardless of who writes the query.
+Think of it like ASP.NET Core middleware, but for MediatR requests. Instead of the middleware pipeline (HTTP Request → Middleware 1 → Middleware 2 → Controller), you have a MediatR pipeline: `IRequest → Behavior 1 → Behavior 2 → Handler`.
+
+This is perfect for cross-cutting concerns: logging, validation, caching, and — in our case — tenant context enforcement.
+
+```csharp
+// Install: dotnet add package MediatR
+// Install: dotnet add package MediatR.Extensions.Microsoft.DependencyInjection
+
+// ─────────────────────────────────────────────────────────────────
+// Program.cs — Register MediatR with pipeline behaviors
+// ─────────────────────────────────────────────────────────────────
+builder.Services.AddMediatR(cfg =>
+{
+    cfg.RegisterServicesFromAssemblyContaining<Program>();
+    
+    // Pipeline behaviors execute in registration order (outer to inner)
+    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>));
+    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(TenantValidationBehavior<,>));
+    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(CachingBehavior<,>));
+});
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Behaviors/TenantValidationBehavior.cs
+// 
+// This behavior runs BEFORE every MediatR handler.
+// It ensures:
+//   1. The tenant context is resolved
+//   2. The school is active (not suspended)
+//   3. The school has access to the requested feature
+//   4. The tenant's SchoolId is stamped onto the request if it implements ITenantRequest
+//
+// Result: Every handler can TRUST that the tenant is valid.
+// Handlers don't need to check this themselves — it's already done.
+// ─────────────────────────────────────────────────────────────────
+
+// Marker interface for requests that require tenant context
+public interface ITenantRequest
+{
+    string SchoolId { get; set; }
+}
+
+public class TenantValidationBehavior<TRequest, TResponse>
+    : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : notnull
+{
+    private readonly ITenantContext _tenantContext;
+    private readonly ILogger<TenantValidationBehavior<TRequest, TResponse>> _logger;
+
+    public TenantValidationBehavior(
+        ITenantContext tenantContext,
+        ILogger<TenantValidationBehavior<TRequest, TResponse>> logger)
+    {
+        _tenantContext = tenantContext;
+        _logger = logger;
+    }
+
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken cancellationToken)
+    {
+        // If the request requires tenant context, validate it
+        if (request is ITenantRequest tenantRequest)
+        {
+            // Ensure tenant is resolved (middleware should have done this)
+            if (!_tenantContext.IsResolved)
+            {
+                throw new UnauthorizedAccessException(
+                    "School context could not be determined for this request.");
+            }
+
+            // Ensure the school is active and not suspended
+            var school = _tenantContext.SchoolInfo;
+            if (school is null || !school.IsActive)
+            {
+                throw new InvalidOperationException(
+                    $"School '{_tenantContext.SchoolId}' is not active.");
+            }
+
+            // Stamp the SchoolId onto the request object itself
+            // This makes the SchoolId available inside the handler
+            // without needing to inject ITenantContext there too
+            tenantRequest.SchoolId = _tenantContext.SchoolId;
+
+            _logger.LogDebug("Tenant validated for request {RequestType}: SchoolId={SchoolId}",
+                typeof(TRequest).Name, _tenantContext.SchoolId);
+        }
+
+        // Continue to the next behavior or the handler
+        return await next();
+    }
+}
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Example Query using MediatR
+// ─────────────────────────────────────────────────────────────────
+
+// The query — note it implements ITenantRequest
+public record GetStudentProgressQuery(int StudentId) 
+    : IRequest<StudentProgressResponse>, ITenantRequest
+{
+    // SchoolId is set automatically by TenantValidationBehavior
+    // The handler doesn't need to worry about setting it
+    public string SchoolId { get; set; } = string.Empty;
+}
+
+public record StudentProgressResponse(
+    int StudentId,
+    string StudentName,
+    string CurrentUnit,
+    int CompletedLessons,
+    double AverageScore);
+
+// The handler — clean and focused on business logic only
+// No need to validate tenant, no need to inject ITenantContext
+public class GetStudentProgressQueryHandler 
+    : IRequestHandler<GetStudentProgressQuery, StudentProgressResponse>
+{
+    private readonly IStudentRepository _students;
+    private readonly IProgressRepository _progress;
+
+    public GetStudentProgressQueryHandler(
+        IStudentRepository students, 
+        IProgressRepository progress)
+    {
+        _students = students;
+        _progress = progress;
+    }
+
+    public async Task<StudentProgressResponse> Handle(
+        GetStudentProgressQuery request, 
+        CancellationToken cancellationToken)
+    {
+        // The SchoolId is already set by TenantValidationBehavior.
+        // The repository's EF Core DbContext has GlobalQueryFilters
+        // that automatically scope all queries to this school.
+        // So GetByIdAsync will ONLY return students in the current school.
+        var student = await _students.GetByIdAsync(request.StudentId)
+            ?? throw new NotFoundException($"Student {request.StudentId} not found.");
+
+        var completedLessons = await _progress.GetCompletedCountAsync(request.StudentId);
+        var avgScore = await _progress.GetAverageScoreAsync(request.StudentId);
+
+        return new StudentProgressResponse(
+            student.Id,
+            student.Name,
+            student.CurrentUnit,
+            completedLessons,
+            avgScore);
+    }
+}
+```
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// Controller using MediatR — extremely clean
+// ─────────────────────────────────────────────────────────────────
+[ApiController]
+[Route("api/students")]
+public class StudentsController : ControllerBase
+{
+    private readonly IMediator _mediator;
+
+    public StudentsController(IMediator mediator) => _mediator = mediator;
+
+    [HttpGet("{studentId:int}/progress")]
+    public async Task<ActionResult<StudentProgressResponse>> GetProgress(int studentId)
+    {
+        // The controller doesn't know or care about tenants.
+        // The MediatR pipeline handles it.
+        var result = await _mediator.Send(new GetStudentProgressQuery(studentId));
+        return Ok(result);
+    }
+}
+```
+
+This is the beauty of MediatR pipeline behaviors: the concern of "is the tenant valid?" is handled **once**, in one place, for every request in the system. Handlers stay small and focused purely on business logic.
+
+---
+
+## 10. Row-Level Security in PostgreSQL and SQL Server
+
+EF Core global query filters protect at the application layer. For additional defense, enforce isolation at the **database layer** — so even raw SQL queries or direct DB connections can't bypass the tenant filter.
+
+### PostgreSQL Row-Level Security (RLS)
 
 ```sql
 -- ─────────────────────────────────────────────────────────────────
--- PostgreSQL Row-Level Security for LinguaLearn
+-- PostgreSQL RLS for Grapeseed
 -- ─────────────────────────────────────────────────────────────────
 
--- Step 1: Enable RLS on the Students table
+-- Step 1: Enable RLS
 ALTER TABLE "Students" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "LessonProgress" ENABLE ROW LEVEL SECURITY;
 
--- Step 2: Create a policy that only allows access to rows
--- where the TenantId matches the current database session variable
-CREATE POLICY tenant_isolation_policy ON "Students"
-    USING ("TenantId" = current_setting('app.current_tenant_id'));
+-- Step 2: Create policy — only see rows for the current school
+CREATE POLICY grapeseed_school_isolation ON "Students"
+    USING ("SchoolId" = current_setting('grapeseed.current_school_id', true));
 
--- Step 3: Set the session variable before each query
--- (your application does this at the start of each request)
-SET LOCAL app.current_tenant_id = 'tokyo-school-001';
+CREATE POLICY grapeseed_school_isolation ON "LessonProgress"
+    USING ("SchoolId" = current_setting('grapeseed.current_school_id', true));
 
--- Now ANY query on Students — even raw SQL — will only see Tokyo's rows:
-SELECT * FROM "Students";
--- Result: Only Tokyo school's students, even though the SQL has no WHERE clause!
+-- Step 3: Your application sets this variable at the start of each request
+-- (see C# code below)
 ```
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// How to set the PostgreSQL session variable from C# / EF Core
+// Setting the PostgreSQL session variable from EF Core
 // ─────────────────────────────────────────────────────────────────
-public class TenantAwareDbContext : ApplicationDbContext
+public class GrapeseekDbContext : DbContext
 {
-    public TenantAwareDbContext(
-        DbContextOptions<ApplicationDbContext> options,
-        ITenantContext tenantContext) : base(options, tenantContext)
-    {
-    }
+    // ... (see earlier code) ...
 
-    // Override OnConfiguring to set the session variable before any query
-    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    // Call this before any query execution to activate RLS
+    public async Task ApplyTenantSessionPolicyAsync()
     {
-        await SetTenantSessionVariableAsync();
-        return await base.SaveChangesAsync(cancellationToken);
-    }
-
-    // Call this before any raw SQL or query execution
-    public async Task SetTenantSessionVariableAsync()
-    {
-        await Database.ExecuteSqlRawAsync(
-            "SET LOCAL app.current_tenant_id = {0}", 
-            _tenantContext.TenantId
-        );
+        if (_tenantContext.IsResolved)
+        {
+            // SET LOCAL applies only to the current transaction — safe for pooled connections
+            await Database.ExecuteSqlRawAsync(
+                "SELECT set_config('grapeseed.current_school_id', {0}, true)",
+                _tenantContext.SchoolId
+            );
+        }
     }
 }
 ```
 
-With both EF Core query filters AND database-level RLS, you have **defense in depth**: two independent layers of tenant isolation. A bug in one layer doesn't compromise the whole system.
+### SQL Server Row-Level Security
 
----
+Grapeseed's Analytics Service and some enterprise integrations use SQL Server. SQL Server supports RLS through **Security Policies**:
 
-## 10. Tenant-Aware Feature Flags and Configuration
+```sql
+-- ─────────────────────────────────────────────────────────────────
+-- SQL Server RLS for Grapeseed Analytics DB
+-- ─────────────────────────────────────────────────────────────────
 
-Different schools have different subscriptions, and different features should be available to different tenants. This is called **tenant-aware feature flagging**.
+-- Step 1: Create a schema for security functions
+CREATE SCHEMA Security;
+GO
+
+-- Step 2: Create the predicate function
+-- This function returns 1 (allow) if the row's SchoolId matches
+-- the SESSION_CONTEXT value set by the application
+CREATE FUNCTION Security.GrapeseekTenantFilter(@SchoolId NVARCHAR(100))
+    RETURNS TABLE
+WITH SCHEMABINDING
+AS
+    RETURN SELECT 1 AS FilterResult
+    WHERE @SchoolId = CAST(SESSION_CONTEXT(N'SchoolId') AS NVARCHAR(100));
+GO
+
+-- Step 3: Apply the security policy to the ReportData table
+CREATE SECURITY POLICY GrapeseekTenantPolicy
+    ADD FILTER PREDICATE Security.GrapeseekTenantFilter(SchoolId) ON dbo.StudentReportData,
+    ADD BLOCK PREDICATE Security.GrapeseekTenantFilter(SchoolId) ON dbo.StudentReportData
+WITH (STATE = ON);
+GO
+```
 
 ```csharp
 // ─────────────────────────────────────────────────────────────────
-// ITenantFeatureService.cs — Check what's enabled for this tenant
+// Setting SQL Server SESSION_CONTEXT from EF Core
+// ─────────────────────────────────────────────────────────────────
+public class AnalyticsDbContext : DbContext
+{
+    private readonly ITenantContext _tenantContext;
+
+    public async Task ApplyTenantSessionContextAsync()
+    {
+        if (_tenantContext.IsResolved)
+        {
+            // Set SESSION_CONTEXT for SQL Server RLS
+            await Database.ExecuteSqlRawAsync(
+                "EXEC sp_set_session_context N'SchoolId', {0}",
+                _tenantContext.SchoolId
+            );
+        }
+    }
+}
+```
+
+With both EF Core global filters AND database-level RLS enabled, you have **defense in depth**: two independent, autonomous layers of isolation. A bug in one layer cannot compromise the other.
+
+---
+
+## 11. Tenant-Aware Feature Flags and Configuration
+
+Grapeseed has multiple license tiers. Feature flags control what each school can access:
+
+```csharp
+// ─────────────────────────────────────────────────────────────────
+// GrapeseekFeatures.cs — Centralized feature flag constants
+// ─────────────────────────────────────────────────────────────────
+public static class GrapeseekFeatures
+{
+    // Available to all tiers
+    public const string CoreLessons = "core_lessons";
+    public const string BasicQuizzes = "basic_quizzes";
+    public const string TeacherDashboard = "teacher_dashboard";
+
+    // Standard tier and above
+    public const string ProgressReports = "progress_reports";
+    public const string ParentPortal = "parent_portal";
+    public const string SisIntegration = "sis_integration";       // Student Information System
+
+    // Premium tier only
+    public const string LiveCoaching = "live_coaching";
+    public const string AiPronunciation = "ai_pronunciation";
+    public const string AdvancedAnalytics = "advanced_analytics";
+    public const string CustomUnitPacing = "custom_unit_pacing";
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ITenantFeatureService.cs
 // ─────────────────────────────────────────────────────────────────
 public interface ITenantFeatureService
 {
@@ -760,164 +929,202 @@ public interface ITenantFeatureService
 
 public class TenantFeatureService : ITenantFeatureService
 {
-    private readonly ITenantContext _tenantContext;
-    private readonly IDistributedCache _cache;
-
-    // Feature names as constants to avoid typos
-    public static class Features
-    {
-        public const string LiveVideoClass = "live_video_class";
-        public const string AiPronunciation = "ai_pronunciation";
-        public const string AdvancedAnalytics = "advanced_analytics";
-        public const string CustomLessonBuilder = "custom_lesson_builder";
-        public const string ParentPortal = "parent_portal";
-    }
+    private readonly ITenantContext _tenant;
 
     public bool IsEnabled(string featureName)
     {
-        var tenantInfo = _tenantContext.TenantInfo;
-        if (tenantInfo is null) return false;
-
-        // Check the feature flags dictionary from TenantInfo
-        return tenantInfo.Features.TryGetValue(featureName, out var isEnabled) && isEnabled;
+        var school = _tenant.SchoolInfo;
+        if (school is null) return false;
+        return school.Features.TryGetValue(featureName, out var enabled) && enabled;
     }
 
     public T GetSetting<T>(string settingKey, T defaultValue)
     {
-        var tenantInfo = _tenantContext.TenantInfo;
-        // Return tenant-specific setting, or platform default if not configured
-        // ... implementation ...
+        // Return the school-specific setting, or fall back to the platform default
+        // Settings stored in ElastiCache keyed by "tenant-settings:{schoolId}:{settingKey}"
+        // ...
         return defaultValue;
     }
 }
 ```
 
 ```csharp
-// ─────────────────────────────────────────────────────────────────
-// LessonsController.cs — Using feature flags
-// ─────────────────────────────────────────────────────────────────
-[ApiController]
-[Route("api/lessons")]
-public class LessonsController : ControllerBase
+// Using features in a controller:
+[HttpPost("coaching/schedule")]
+public async Task<IActionResult> ScheduleCoachingSession(ScheduleCoachingRequest request)
 {
-    private readonly ILessonService _lessonService;
-    private readonly ITenantFeatureService _features;
-
-    public LessonsController(ILessonService lessonService, ITenantFeatureService features)
+    if (!_features.IsEnabled(GrapeseekFeatures.LiveCoaching))
     {
-        _lessonService = lessonService;
-        _features = features;
-    }
-
-    [HttpPost("custom")]
-    public async Task<IActionResult> CreateCustomLesson(CreateLessonRequest request)
-    {
-        // Only premium schools with the custom lesson builder can create lessons
-        if (!_features.IsEnabled(TenantFeatureService.Features.CustomLessonBuilder))
+        return StatusCode(403, new
         {
-            return StatusCode(StatusCodes.Status403Forbidden,
-                new { Message = "Custom lesson creation is not available in your plan. " +
-                                "Please contact us to upgrade." });
-        }
-
-        var lesson = await _lessonService.CreateCustomLessonAsync(request);
-        return CreatedAtAction(nameof(GetLesson), new { id = lesson.Id }, lesson);
+            Error = "Live Coaching is not included in your current Grapeseed license.",
+            UpgradeUrl = "https://grapeseed.com/upgrade"
+        });
     }
+    
+    var result = await _mediator.Send(new ScheduleCoachingCommand(request));
+    return Ok(result);
 }
 ```
 
 ---
 
-## 11. The Education Platform Scenario
+## 12. Storing Tenant Data on AWS
 
-Let's trace a complete request through the multi-tenant LinguaLearn system:
+### Tenant Configuration in ElastiCache
+
+School configurations (name, logo, features, timezone) are read on every request. Cache them aggressively:
+
+```csharp
+// TenantContext.cs — Loading school info with Redis caching
+public async Task SetTenantAsync(string schoolId)
+{
+    SchoolId = schoolId;
+
+    // Try ElastiCache first
+    var cacheKey = $"school-info:{schoolId}";
+    var cached = await _cache.GetStringAsync(cacheKey);
+    if (cached is not null)
+    {
+        SchoolInfo = JsonSerializer.Deserialize<SchoolInfo>(cached);
+        IsResolved = true;
+        return;
+    }
+
+    // Load from RDS
+    SchoolInfo = await _schoolRepository.GetSchoolInfoAsync(schoolId);
+    IsResolved = SchoolInfo is not null;
+
+    if (SchoolInfo is not null)
+    {
+        // Cache for 30 minutes — school settings change rarely
+        await _cache.SetStringAsync(
+            cacheKey,
+            JsonSerializer.Serialize(SchoolInfo),
+            new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(30)
+            });
+    }
+}
+```
+
+### Tenant Files in S3
+
+Student certificates, lesson PDFs, and audio recordings are stored in S3 with **school-level prefixes**:
 
 ```
-Scenario: A student at Tokyo English Academy opens their lesson dashboard.
+S3 Bucket: grapeseed-content-prod
+├── schools/
+│   ├── school-bkk-001/
+│   │   ├── certificates/student-123-unit3.pdf
+│   │   ├── recordings/student-123-unit2-lesson5.mp3
+│   │   └── teacher-uploads/custom-lesson-template.pdf
+│   │
+│   └── school-tor-002/
+│       ├── certificates/student-456-unit6.pdf
+│       └── recordings/student-456-unit5-lesson3.mp3
+│
+└── shared/
+    ├── grapeseed-lessons/unit1/lesson1/video.mp4
+    └── grapeseed-lessons/unit1/lesson1/worksheet.pdf
+```
+
+S3 bucket policies and IAM roles ensure that Grapeseed's backend can access all paths, but tenant-facing pre-signed URLs are scoped to the specific school's prefix.
+
+---
+
+## 13. The Grapeseed Scenario
+
+Let's trace a complete request through the multi-tenant Grapeseed system:
+
+```
+Scenario: A student at Bangkok English Academy opens their Grapeseed dashboard.
 
 1. HTTP Request arrives:
-   GET https://tokyo.lingualearn.com/api/lessons
+   GET https://bangkok.grapeseed.com/api/students/me/progress
    Authorization: Bearer eyJhbGciOiJSUzI1NiJ9... (JWT)
+   
+   JWT payload (decoded):
+   { "sub": "student-789", "school_id": "school-bkk-001", "role": "student" }
 
 2. TenantResolutionMiddleware runs:
-   - Reads JWT claim: tenant_id = "tokyo-school-001"
-   - Sets ITenantContext.TenantId = "tokyo-school-001"
-   - Loads TenantInfo from Redis cache:
-     { Name: "Tokyo English Academy", Plan: "premium", 
-       Features: { ai_pronunciation: true, live_video: true } }
+   - Reads JWT claim: school_id = "school-bkk-001"
+   - Calls TenantContext.SetTenantAsync("school-bkk-001")
+   - ElastiCache HIT: SchoolInfo loaded in ~1ms
+     { Name: "Bangkok English Academy", Tier: "standard", 
+       TimeZone: "Asia/Bangkok", LicensedUnits: 8 }
+   - ITenantContext.IsResolved = true
 
-3. LessonsController.GetAllLessons() is called.
-   Injects ILessonService (which injects ITenantContext and ApplicationDbContext)
+3. Controller calls _mediator.Send(new GetStudentProgressQuery(789)):
 
-4. ApplicationDbContext.Students.ToListAsync() executes:
-   EF Core adds the Global Query Filter automatically.
-   SQL Generated:
-   SELECT * FROM "Lessons" 
-   WHERE "TenantId" = 'tokyo-school-001'
-   ORDER BY "Unit", "Level"
+4. MediatR Pipeline:
+   ├── LoggingBehavior: logs "Handling GetStudentProgressQuery for school-bkk-001"
+   ├── TenantValidationBehavior:
+   │     - Confirms school-bkk-001 is active ✅
+   │     - Stamps request.SchoolId = "school-bkk-001"
+   └── Handler executes:
+
+5. StudentRepository.GetByIdAsync(789) executes:
+   Generated SQL:
+   SELECT * FROM "Students"
+   WHERE "SchoolId" = 'school-bkk-001'   ← added by Global Query Filter
+   AND "Id" = 789
    
-   Returns: 48 lessons belonging to Tokyo English Academy only.
-   London School's 52 lessons: never touched. Never visible.
+   Result: Siriporn's profile (Bangkok school). 
+   Student 456 from Toronto: never touched. Never visible.
 
-5. Response is assembled. TenantInfo.PrimaryColor = "#E74C3C" (Tokyo's red).
-   The response includes this for the UI to render the school's branding.
+6. Response sent. 
+   Siriporn sees her Unit 3 progress in Bangkok English Academy's branding.
+   A student at Toronto English School, in a parallel request, sees Toronto's data.
 
-6. Student sees their school's branded dashboard with their 48 lessons.
-   A student at London School, in a separate request, sees London's 52 lessons
-   in London's blue (#3498DB) branding.
-
-Everything is isolated. No bugs required to maintain isolation.
-It's enforced architecturally.
+All isolation is enforced architecturally.
+No bugs required to maintain it. It simply cannot be breached by accident.
 ```
 
 ---
 
-## 12. Decision Guide — Which Model Should You Choose?
+## 14. Decision Guide
 
 | Criteria | Model 1 (Separate DB) | Model 2 (Separate Schema) | Model 3 (Shared Tables) |
 |----------|-----------------------|---------------------------|-------------------------|
-| Max practical tenants | ~100 | ~1,000 | Unlimited |
-| Data isolation strength | Maximum | High | Good (with guards) |
-| Infra cost | Highest | Medium | Lowest |
-| Schema migration complexity | Very high | High | Low (once for all) |
-| Data residency compliance | ✅ Easy | ⚠️ Possible | ❌ Hard |
-| Per-tenant DB backup/restore | ✅ Easy | ✅ Easy | ❌ Hard |
-| Implementation complexity | Medium | Medium | High |
-| Performance isolation | ✅ Perfect | ✅ Good | ⚠️ Needs rate limiting |
-| Best for | Regulated enterprise | Mid-market B2B | High-volume SaaS |
+| Max practical schools | ~50-100 | ~500-1,000 | Unlimited |
+| Data isolation | Maximum | High | Good (with EF filters + RLS) |
+| AWS cost | Highest | Medium | Lowest |
+| Migration complexity | Run per tenant | Run per schema | Run once |
+| Data residency (PDPA, GDPR) | ✅ Easy | ⚠️ Possible | ❌ Complex |
+| Per-school backup/restore | ✅ Easy | ✅ Easy | ❌ Complex |
+| Best for | Enterprise districts | Mid-market | Standard schools |
 
 ---
 
-## 13. Summary and Key Takeaways
+## 15. Summary and Key Takeaways
 
 ### Core Concepts
 
 | Concept | One-Line Summary |
 |---------|-----------------|
-| Multi-tenancy | One application serving many isolated customers |
-| Model 1: Separate DB | Maximum isolation, highest cost, best for regulated clients |
-| Model 2: Separate Schema | Good isolation, moderate cost, practical for hundreds of tenants |
-| Model 3: Shared Tables | Lowest cost, highest scalability, requires strict code discipline |
-| TenantId | The discriminator column that identifies every row's owner |
-| Tenant Resolution | How the app determines which tenant is making a request |
-| Global Query Filter | EF Core's way of automatically scoping all queries by TenantId |
-| Row-Level Security | Database-level enforcement of tenant isolation (defense in depth) |
-| Feature Flags | Per-tenant toggles for features, enabling tiered subscription plans |
+| Multi-tenancy | One application, many isolated schools |
+| Model 3 (Shared Tables) | Most cost-efficient; requires rigorous SchoolId scoping |
+| EF Core Global Query Filters | Automatically adds WHERE SchoolId = @id to every query |
+| Auto-set SchoolId on INSERT | SaveChangesAsync override ensures new rows always have SchoolId |
+| MediatR TenantValidationBehavior | Validates and stamps tenant context before every handler runs |
+| PostgreSQL RLS | Database-enforced row filtering (defense in depth) |
+| SQL Server Security Policy | Same concept for the analytics SQL Server database |
+| Feature flags | Per-school license tier control via dictionary in SchoolInfo |
+| ElastiCache | Cache SchoolInfo for 30 minutes to avoid RDS on every request |
+| S3 school prefixes | Tenant-scoped file storage with IAM-controlled access |
 
 ### The Golden Rules of Multi-Tenancy
 
-1. **Resolve the tenant early** — The very first thing middleware should do is figure out which tenant is talking.
-2. **Make isolation automatic** — Global Query Filters and RLS ensure developers can't forget tenant scoping.
-3. **Index TenantId** — Every query filters by TenantId. Without an index, all queries become table scans.
-4. **Cache TenantInfo** — TenantInfo is read on every request. Cache it in Redis to avoid DB hits.
-5. **Test cross-tenant data leakage** — Write explicit tests that verify Tenant A cannot access Tenant B's data.
-
-### What's Next
-
-You can now build a multi-tenant application where hundreds of schools share the same infrastructure without seeing each other's data. In the next chapter, we tackle what happens when all those schools send so much traffic that your servers struggle to keep up.
+1. **Resolve the tenant first** — The very first middleware action must be tenant resolution.
+2. **Make isolation automatic** — EF Core filters + DB RLS + MediatR behaviors. Isolation by architecture, not discipline.
+3. **Index `SchoolId`** — Every single query filters by `SchoolId`. Without a composite index, you'll do full table scans.
+4. **Cache school info** — `SchoolInfo` is read on every request. Cache it in ElastiCache for 30 minutes.
+5. **Test for leakage** — Write explicit integration tests that verify school A cannot see school B's data, even with direct repository calls.
 
 *→ Continue to: [Chapter 3 — High Load Systems](./book_ch3_high_load_systems.md)*
 
 ---
 
-*Chapter 2 Complete · 13 sections · Multi-Tenant Architecture*
+*Chapter 2 Complete · 15 sections · Multi-Tenant Architecture on AWS*
