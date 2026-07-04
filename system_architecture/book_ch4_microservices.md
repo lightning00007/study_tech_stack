@@ -2,8 +2,8 @@
 
 > **System Design · MediatR CQRS · AWS Service Architecture**
 > *"MediatR is not just a library — it is a discipline. It forces you to think of every operation as a named, explicit thing with a clear purpose."*
-> *"Conway's Law: Any organization that designs a system will produce a design whose structure copies the organization's communication structure."*
-> — Melvin Conway, 1967
+>
+> *Context: GrapeSEED's platform is delivered through four distinct products: the Student App (REP), Nexus (teacher tool), Connect (virtual classroom), and the School Portal (admin). Each product has its own team and its own rate of change. MediatR and microservices make independent deployment possible.*
 
 ---
 
@@ -1111,13 +1111,14 @@ Phase 3: Extract VideoService (different scaling profile)
 
 | Phase | Service | Reason to Extract |
 |-------|---------|------------------|
-| 1 | NotificationService | Stateless, fewest dependencies, easy to test independently |
-| 2 | VideoService | Very different scaling profile (CPU-intensive transcoding) |
-| 3 | AnalyticsService | SQL Server, different tech, different team |
-| 4 | ProgressService | High write volume on exam day — independent scaling valuable |
-| 5 | LessonService | High read volume — independent caching and read replica strategy |
-| 6 | SchoolService | Tenant management — foundational, extract carefully |
-| Last | IdentityService | Most critical, most complex, extract when team is experienced |
+| 1 | NotificationService | Stateless, sends emails/push via SES/SNS. Minimal dependencies. |
+| 2 | AnalyticsService | Uses SQL Server. Different team, different tech, different scaling. |
+| 3 | ContentService | High read volume (REP playlists, lesson metadata). Independent caching + read replica strategy. |
+| 4 | ProgressService | High write volume during morning REP sessions. Independent scaling. |
+| 5 | SchoolPortalService | License management and tenant data. Extract carefully — other services depend on it. |
+| 6 | NexusService | Teacher classroom features. Closely coupled to ContentService; extract together. |
+| 7 | ConnectService | Virtual classroom has unique infrastructure needs (WebRTC, media processing). |
+| Last | IdentityService | Most critical (everything depends on it). Extract when team is fully experienced with microservices. |
 
 ---
 

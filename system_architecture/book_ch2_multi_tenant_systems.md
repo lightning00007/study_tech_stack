@@ -1,7 +1,9 @@
 # Chapter 2: Multi-Tenant Architecture
 
 > **Advanced Architecture Pattern · Data Isolation · Enterprise SaaS on AWS**
-> *"Multi-tenancy is the art of serving many schools from one system, while making each school feel like they have the platform all to themselves."*
+> *"Multi-tenancy is the art of serving many partner schools from one system, while making each school feel like they have the platform all to themselves."*
+>
+> *Context: GrapeSEED is a B2B company — it does not sell to parents or children directly. It partners with preschools, kindergartens, and language centers worldwide. Each partner school is a tenant in the system.*
 
 ---
 
@@ -27,23 +29,23 @@
 
 ## 1. Introduction — One Platform, Many Schools
 
-Imagine you run a franchise restaurant company. You have 300 restaurants in 20 countries. Each restaurant has its own staff, its own local menu adaptations, its own loyalty card members, and its own sales figures.
+Imagine you run a restaurant franchise company. You have 300 restaurants in 20 countries. Each restaurant has its own staff, its own local menu adaptations, its own loyalty card members, and its own sales figures.
 
-You could run separate software for each restaurant. That's 300 software deployments to maintain. When you fix a bug, you fix it 300 times. When you release a new feature (online ordering), you deploy it 300 times. Clearly, that doesn't scale.
+You could run separate software for each restaurant. That's 300 software deployments to maintain. When you fix a bug, you fix it 300 times. When you release a new feature, you deploy it 300 times. Clearly, that doesn't scale.
 
-Instead, your company runs one central system. Each restaurant logs in and sees only their own staff, their own menu, their own customers. They don't know — and don't care — that 299 other restaurants share the same software. From their perspective, they have their own private system.
+Instead, your company runs one central system. Each restaurant logs in and sees only their own staff, menu, and customers. They don't know — and don't care — that 299 other restaurants share the same software.
 
-**This is multi-tenancy.** In Grapeseed's world:
-- Each school or school district is a **tenant**
-- Grapeseed is the central software
-- Every tenant gets a completely isolated experience on the same shared AWS infrastructure
+**This is multi-tenancy.** In GrapeSEED's real-world context:
+- Each **partner school** (a preschool, kindergarten, or language center) is a **tenant**
+- GrapeSEED's platform is the shared software
+- A partner school in Hanoi and a partner school in Seoul both use the same platform, but they see only their own students, their own class structures, and their own licensed content
 
-Each Grapeseed school tenant needs:
-- Their own students and teachers, completely isolated from other schools
-- Their own lesson assignments and curriculum pacing
-- Their own configuration (academic year settings, timezone, language settings)
-- Their own branding (school logo, school name in emails)
-- **Absolute guarantee that their data cannot leak to other schools**
+Each GrapeSEED partner school needs:
+- Their own **student licenses** (they purchase a number of student seats from GrapeSEED)
+- Their own **campus and class structures** managed by their administrators
+- Their own teacher accounts linked to the school's classes
+- **Absolute guarantee that their students' data cannot be seen by other schools**
+- Their own delivery model configuration: classic (Nexus in-class), online (Connect), or hybrid
 
 ---
 
@@ -57,20 +59,21 @@ No matter what happens, these three guarantees must hold:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│              The Multi-Tenancy Guarantees                        │
+│           The Multi-Tenancy Guarantees                        │
 │                                                                   │
 │  1. DATA ISOLATION                                               │
-│     School A can never read or write School B's data.           │
-│     Not through bugs. Not through API manipulation.             │
-│     Not through misconfigured IAM policies.                     │
+│     School A's students in Vietnam can never see School B's      │
+│     students in South Korea. Not through bugs. Not through       │
+│     API manipulation. Not through IAM misconfigurations.         │
 │                                                                   │
-│  2. CONFIGURATION ISOLATION                                      │
-│     Changing School A's settings never affects School B.         │
-│     Each school configures their own experience.                │
+│  2. LICENSE ISOLATION                                            │
+│     School A's student license count is independent of           │
+│     School B's. Purchasing or using licenses in one school       │
+│     never affects another school's availability.                 │
 │                                                                   │
 │  3. PERFORMANCE ISOLATION                                        │
-│     School A running a heavy report export should not slow      │
-│     down the lesson experience for students in School B.        │
+│     School A's teacher exporting a large class report should     │
+│     not slow down children's REP sessions in School B.           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

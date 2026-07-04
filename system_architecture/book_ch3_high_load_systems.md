@@ -2,6 +2,8 @@
 
 > **Performance Engineering · AWS Auto-Scaling · High Availability**
 > *"Any system popular enough to matter will eventually be crushed under its own success. The engineers who survive this know it's coming and prepare."*
+>
+> *Context: GrapeSEED's daily usage pattern is highly predictable — children do their REP sessions in the morning before school or in the evening after school, clustered by timezone. Back-to-school weeks and regional holidays create sharp spikes. Your system must absorb them gracefully.*
 
 ---
 
@@ -26,20 +28,20 @@
 
 ## 1. Introduction — National Exam Day
 
-It's Sunday evening in Vietnam. Tomorrow is the national English proficiency assessment for 180,000 middle school students. As part of their preparation, all students are using the Grapeseed program assigned by their school district. At 8:00 AM Monday, every single one of them opens the app.
+It's Sunday evening in Southeast Asia. Monday is the first day of school for hundreds of GrapeSEED partner schools across Vietnam, South Korea, Japan, and Thailand. Every parent has been told: make sure your child completes their GrapeSEED REP session before class.
 
-In 60 seconds, Grapeseed goes from its normal Monday morning traffic of 8,000 active users to 180,000. That's a 22x traffic spike. Your AWS bill is about to have a very interesting line item — or your error logs are.
+At 7:00 AM local time across multiple time zones, tens of thousands of children simultaneously open the **GrapeSEED Student App**. This isn't a surprise event — it's back-to-school season, and it happens every year. Your AWS infrastructure needs to be ready.
 
-If your infrastructure isn't designed for this moment:
+In a system that hasn't been designed for this:
 
-- **8:00:00** — ECS tasks hit 100% CPU. New requests start queuing at the ALB.
-- **8:00:15** — RDS connection pool exhausted. EF Core throws `NpgsqlException: connection pool exhausted`.
-- **8:00:30** — ElastiCache cache misses spike because the app is restarting.
-- **8:00:45** — ECS health checks fail. ALB routes to fewer and fewer healthy tasks.
-- **8:01:00** — Complete outage. 180,000 students see a white error screen.
-- **8:01:30** — The school district administrator calls Grapeseed support.
+- **7:00:00** — ECS tasks hit 100% CPU. Children see loading spinners on their daily playlist screen.
+- **7:00:15** — RDS connection pool exhausted. The ContentService can't build playlists. `NpgsqlException: connection pool exhausted`.
+- **7:00:30** — Playlist audio files fail to stream. CloudFront returns errors because the origin (ECS) is too slow.
+- **7:00:45** — ECS health checks fail. ALB routes to fewer and fewer healthy tasks.
+- **7:01:00** — Complete outage. Children see error screens. Parents message teachers. Teachers call the school administrator.
+- **7:01:30** — School administrators call GrapeSEED support. GrapeSEED's reputation in those markets takes a serious hit.
 
-**High load engineering prevents this.** It is the discipline of anticipating traffic patterns, designing systems with appropriate headroom and elasticity, and building automatic responses to demand spikes — so that when exam day arrives, the platform absorbs it without anyone touching a server.
+**High load engineering prevents this.** And for GrapeSEED, the traffic pattern is actually quite **predictable** — morning REP sessions follow school day start times, clustered by timezone. This predictability means you can prepare in advance with scheduled scaling, rather than always reacting.
 
 ---
 
@@ -1078,59 +1080,57 @@ public class WeeklyProgressReportJob
 
 ---
 
-## 12. The Grapeseed Scenario — Exam Day
+## 12. The GrapeSEED Scenario — Back-to-School Week
 
-With all high-load patterns applied, let's trace exam day:
+With all high-load patterns applied, let's trace GrapeSEED's busiest week:
 
 ```
-08:00:00 — 180,000 students open Grapeseed simultaneously.
+Monday, 7:00 AM — Back-to-school for 50 partner schools across Vietnam and South Korea.
+The GrapeSEED Student App receives 30,000 simultaneous playlist requests.
 
-SCHEDULED SCALING (pre-configured for Monday morning):
-- ECS tasks already pre-warmed to 15 instances since midnight
+SCHEDULED SCALING (pre-configured for Monday mornings):
+- ECS tasks already pre-warmed to 12 instances since 6:30 AM
+  (Scheduled scaling: every Monday 06:30 UTC+7, min_capacity=12)
 - RDS Proxy connections pre-established
-- ElastiCache warmed up from previous day's traffic
+- ElastiCache warm from previous week's sessions
 
-CLOUDFRONT (handles ~65% of requests):
-- Login page, CSS, JavaScript → served from nearest edge (Bangkok, Ho Chi Minh City, etc.)
-- Lesson images → served from CloudFront / S3
-- Latency: 8-15ms. No ECS task involved.
+CLOUDFRONT (handles ~60% of requests):
+- App shell, CSS, icons → served from edge (Singapore, Seoul, Tokyo edges)
+- REP audio files (songs, stories, chants) → served from S3 via CloudFront
+  (These are the same audio files every child listens to — massive cache hit rate)
+- Latency: 8-20ms from nearest edge. Zero ECS involvement.
 
-ALB + ECS AUTO SCALING:
-- Traffic spike detected. CPU average across tasks climbs to 80%.
-- ECS Auto Scaling triggers: adds 5 tasks every 60 seconds.
-- By 08:03, running 35 tasks. CPU stabilizes at 65%.
+CONTENT SERVICE (builds personalized playlists for the 40% not in CDN cache):
+- MediatR pipeline: LoggingBehavior → TenantValidationBehavior → CachingBehavior → Handler
+- CachingBehavior: 70% HIT rate (yesterday's playlists still valid for returning students)
+- For new school year, playlists are rebuilt with Unit 1 lessons → RDS Read Replica queries
 
-ELASTICACHE (handles ~80% of authenticated requests):
-- Student profiles: HIT (loaded by morning session)
-- Lesson content: HIT (CachingBehavior in MediatR pipeline)
-- School configs: HIT (30-minute TTL, loaded from previous day's sessions)
-- Cache response: ~1ms. RDS barely touched.
+ECS AUTO SCALING:
+- Traffic spike detected. CPU average climbs to 78%.
+- Auto Scaling triggers: adds 3 tasks every 60 seconds.
+- By 7:05 AM, running 24 tasks. CPU stabilizes at 62%.
 
-MEDIATR PIPELINE:
-- Every lesson request: LoggingBehavior → TenantValidationBehavior → CachingBehavior → Handler
-- CachingBehavior: 85% HIT rate on lesson content
-- Only 15% of requests reach the Handler and query RDS Read Replica
+SQS (async progress tracking):
+- Every 30 seconds, REP sessions publish heartbeats to SQS
+- ProgressService consumers process listening records asynchronously
+- Children's listening is never blocked by DB writes
+- Parents open the Parent Portal → see real-time "Completed" status ~30 seconds after REP done
 
-RDS (for the 15% of cache misses):
-- Read Replicas handle all SELECT queries (lesson content, student profiles)
-- Primary only receives writes (progress submissions)
-- RDS Proxy ensures stable connection count despite 35 ECS tasks
+NEXUS TEACHER SESSIONS (school hours, 8:00 AM onwards):
+- Teachers open Nexus tablets to run classroom sessions
+- Nexus traffic is mostly read-only (lesson materials, class roster, REP status)
+- ContentService Read Replica handles this load while Primary handles active-learn writes
 
-SQS (background processing):
-- Every quiz submission publishes "LessonCompleted" message to SQS
-- NotificationService processes email queue asynchronously
-- Students get their results in <100ms; emails arrive within 30-120 seconds
-
-08:30:00 — Traffic normalizes as most students finish their assessments.
+9:30 AM — Morning REP peak subsides as children head to school.
 - ECS Auto Scaling begins scaling in (scale-in cooldown: 5 minutes)
-- By 09:00: back to 8 tasks
-- Cost for exam day extra capacity: ~$45 USD (2 hours × 20 extra tasks × Fargate pricing)
+- By 10:00 AM: back to 6 tasks for daytime traffic
 
-RESULT:
-- 180,000 students served
-- Average latency: P50 = 48ms, P95 = 185ms, P99 = 620ms
-- Zero downtime. Zero manual intervention.
-- Platform admin sees green dashboards all morning.
+OVERALL RESULTS:
+- 30,000 concurrent REP sessions served
+- Zero playlist failures
+- Audio streaming P99 start time: 380ms (CloudFront edge delivery)
+- Progress updates delivered to Parent Portal within 45 seconds of completion
+- Platform admin sees green dashboards all morning
 ```
 
 ---

@@ -3,6 +3,8 @@
 > **Foundational Architecture · Core Theory · AWS Production Patterns**
 > *"A distributed system is one in which the failure of a computer you didn't even know existed can render your own computer unusable."*
 > — Leslie Lamport, Turing Award winner
+>
+> *Context: GrapeSEED serves children in ~19 countries through its Student App (REP), Nexus teacher tool, and Connect virtual classroom. Every one of those products depends on a reliable distributed backend.*
 
 ---
 
@@ -27,9 +29,9 @@
 
 Let's start with a story.
 
-Grapeseed has just signed partnership agreements with 200 schools across Southeast Asia. On the first Monday of the new school year, ten thousand students log into the platform simultaneously to access their first English lesson. Your backend runs on a single EC2 instance — even a powerful `m5.4xlarge` with 16 vCPUs and 64 GB of RAM.
+GrapeSEED has just onboarded 200 new partner schools across Vietnam and South Korea. On the first Monday of the new school year, ten thousand children open the **GrapeSEED Student App (REP)** simultaneously to start their daily English practice playlist — a sequence of songs, chants, and stories that form the core of the GrapeSEED natural-acquisition method. Your backend runs on a single EC2 instance — even a powerful `m5.4xlarge` with 16 vCPUs and 64 GB of RAM.
 
-The server handles the first thousand users fine. At three thousand, CPU climbs to 80%. At six thousand, the RDS database connection pool is exhausted — new queries start failing with `Npgsql.NpgsqlException: The connection pool has been exhausted`. At eight thousand, the application server runs out of memory. At ten thousand, the EC2 instance becomes unresponsive. AWS health checks fail. ECS marks it as unhealthy. Every student sees an error page. Your Slack starts lighting up.
+The server handles the first thousand users fine. At three thousand, CPU climbs to 80%. At six thousand, the RDS database connection pool is exhausted — new queries start failing with `Npgsql.NpgsqlException: The connection pool has been exhausted`. At eight thousand, the application server runs out of memory. At ten thousand, the EC2 instance becomes unresponsive. AWS health checks fail. ECS marks it as unhealthy. Every child's REP playlist fails to load. Teachers using **GrapeSEED Nexus** in classrooms cannot pull up lesson materials. Your Slack starts lighting up.
 
 **This is the fundamental problem that distributed systems solve.**
 
@@ -43,11 +45,12 @@ The catch? The moment you add a second machine, you have introduced a new catego
 
 A **distributed system** is a group of independent computers that communicate over a network to accomplish a shared goal, and appear to end users as a single, unified system.
 
-When a student opens Grapeseed and starts a lesson, they don't know — and shouldn't care — that:
-- Their authentication was validated by an ECS task in `us-east-1`
-- The lesson metadata was fetched from a different ECS task reading an RDS PostgreSQL read replica
-- The lesson video was streamed from Amazon S3 via a CloudFront edge node in their country
-- Their progress was saved asynchronously via an SQS message
+When a child opens the **GrapeSEED Student App (REP)** and taps "Start Today's Playlist", they don't know — and shouldn't care — that:
+- Their authentication was validated by an ECS task running the GrapeSEED IdentityService
+- Their personalized daily playlist was built by the ContentService, reading lesson metadata from RDS PostgreSQL
+- Each song and story audio file is streaming from Amazon S3 via a CloudFront edge node nearest to their country
+- Their listening progress is being saved asynchronously every 30 seconds via an SQS message to the ProgressService
+- If their teacher assigned specific "Active Learn" content via **GrapeSEED Nexus**, that assignment is being queried from the School Portal service
 
 From the student's perspective, they just opened the app and started learning. The distributed system hides all that complexity.
 
@@ -638,44 +641,48 @@ If some components run outside ECS (e.g., a Lambda function, an on-premises inte
 
 ---
 
-## 10. The Grapeseed Scenario
+## 10. The GrapeSEED Scenario
 
-Let's trace a complete request through the Grapeseed distributed system:
+Let's trace what happens when a child in Vietnam opens the **GrapeSEED Student App (REP)** and starts their daily English practice playlist:
 
 ```
-A student in Thailand opens the Grapeseed app and taps "Start Unit 3, Lesson 1".
+A child in Ho Chi Minh City opens the GrapeSEED Student App and taps "Start Today's Playlist".
 
-1. CloudFront (CDN) Edge Node (Bangkok):
-   Static assets (app JS, CSS, images) → served from CloudFront cache.
-   Latency: ~5ms. No ECS instance involved.
+1. CloudFront Edge Node (Singapore / Ho Chi Minh City):
+   App shell (JS, CSS, icons) → served from CloudFront cache.
+   Latency: ~8ms. No ECS instance involved.
 
-2. API Request → AWS API Gateway (Regional Endpoint):
-   GET /api/lessons/unit/3/lesson/1
-   API Gateway validates the JWT token (using Cognito or our IdentityService).
-   Routes request to LessonService ALB target group.
+2. API Request → AWS API Gateway:
+   GET /api/rep/playlist/today
+   API Gateway validates the student's JWT.
+   Routes to ContentService (which builds the daily REP playlist).
 
-3. ALB (Application Load Balancer) → LessonService:
-   ALB uses Least Outstanding Requests algorithm.
-   Routes to the least-busy ECS task.
-   LessonService runs in ap-southeast-1 (Singapore) across 3 AZs.
+3. ALB → ContentService (ECS Fargate, ap-southeast-1, 3 AZs):
+   ContentService builds the student's personalized playlist:
+   a. ElastiCache: checks if today's playlist was already built for this student → MISS.
+   b. RDS PostgreSQL Read Replica: queries the student's current GrapeSEED unit and
+      which lessons the teacher assigned via Nexus.
+   c. Builds ordered playlist: [Song "Hello Song", Story "The Red Ball", Phonogram "A",
+      Poem "Rain Rain Go Away", Active Learn quiz for today's unit].
+   d. Caches playlist in ElastiCache (TTL: until midnight of the student's timezone).
 
-4. LessonService processes the request:
-   a. ElastiCache lookup → HIT (lesson was cached 20 minutes ago) → ~1ms.
-   b. Calls VideoService via HTTP (ECS Service Connect DNS):
-      - Polly checks: is circuit closed? YES.
-      - HTTP GET http://video-service:8080/api/videos/v-unit3-les1/metadata
-      - Response in ~15ms.
-   c. Assembles lesson + video metadata into response.
+4. Student's app receives playlist in ~60ms.
+   First audio file begins streaming immediately from S3 via CloudFront.
+   CloudFront serves audio from the nearest edge node (Singapore edge).
 
-5. Student's device receives response in ~50ms.
-   They tap Play. Video streams from S3 via CloudFront.
-   CloudFront serves the video from the nearest edge node.
+5. As the child listens to each item:
+   Every 30 seconds, the app sends a progress heartbeat.
+   REP progress event → SQS → ProgressService updates listening record.
+   This is async — the child's listening is never blocked by a slow DB write.
 
-6. Async (fire-and-forget via SQS):
-   LessonService publishes "LessonStarted" message to SQS queue.
-   ProgressService reads the queue and updates the student's progress.
-   This happens in the background. The student doesn't wait for it.
+6. When the playlist is complete:
+   "DailyRepCompleted" event → SNS Topic (fan-out):
+   ├─► ParentPortalService: marks today's REP as done (parents can see it)
+   ├─► ProgressService: updates unit completion tracking
+   └─► NexusService: teacher's Nexus dashboard shows student completed today's REP
 ```
+
+The child never experienced a loading screen beyond the initial 60ms. Audio played seamlessly. The teacher sees the completion update in Nexus within seconds. Parents receive a push notification confirming today's practice is done.
 
 ---
 

@@ -1,72 +1,117 @@
 # System Architecture Mastery
-### *A Field Guide for Engineers Building the Grapeseed English Education Program*
+### *A Field Guide for Engineers Building the GrapeSEED English Education Platform*
 
 > *"Good architecture is not about using the fanciest technologies. It is about making the right tradeoffs at the right time."*
 > — Every senior engineer who has ever been paged at 3 AM
 
 ---
 
-## Welcome to This Book
+## About GrapeSEED — Know What You're Building
 
-You are building the **Grapeseed English Education Program** — a platform that delivers structured English lessons, interactive videos, quizzes, and school management tools to institutions around the world. Grapeseed is not a simple CRUD application. It needs to:
+Before writing a single line of code, you should understand the product and the company deeply. Architecture decisions must serve the business and the users, not the other way around.
 
-- Serve **students and teachers globally** across multiple continents and time zones
-- Keep **school data strictly separated** — a student in one school must never see data from another
-- Stay online **even during AWS region issues**, network problems, or database failures
-- **Scale automatically** when exam season arrives and traffic spikes
-- Support **both PostgreSQL and SQL Server** databases for different parts of the system
-- Be maintained by teams using a consistent, organized code structure through **MediatR**
+### What Is GrapeSEED?
 
-To build Grapeseed at this level of quality, you need to understand four foundational pillars of modern backend engineering. This book teaches all four, with every example grounded in **the Grapeseed platform, on AWS, using C# with EF Core, Redis, and MediatR**.
+**GrapeSEED** is an English oral language acquisition program for children aged 4–12, designed to help children learn English the same natural way they learned their native language — through continuous, meaningful exposure, not through memorizing grammar rules.
+
+The program was born out of decades of teaching at **MeySen Academy in Japan**, founded in 1967 by American educators **John Broman and Daniel Fanger**. After years of observing how children naturally acquire language, they developed a methodology grounded in research on language acquisition, early childhood education, and brain development. GrapeSEED grew out of that work into a structured, globally-deployed curriculum.
+
+GrapeSEED currently operates in approximately **18–19 countries** including Japan, South Korea, Vietnam, Thailand, Cambodia, Malaysia, Mongolia, China, Myanmar, Russia, Albania, Italy, and the United States. Its users are preschools, kindergartens, and language centers — institutions that partner with GrapeSEED to offer structured English programs to young children.
+
+### The Teaching Philosophy That Drives the Tech
+
+Understanding the *why* behind GrapeSEED's methodology helps you understand what the system must do technically:
+
+- **Natural acquisition over memorization:** Children learn by hearing the same songs, stories, chants, and phrases repeatedly over weeks. This means the system must serve **audio and video content reliably at scale**, across devices, often in countries with inconsistent internet infrastructure.
+- **Controlled vocabulary progression:** Content is carefully sequenced — you cannot skip a unit. The system must enforce curriculum order and track progress against a specific sequence, not just any collection of lessons.
+- **Teacher-led classroom + at-home practice:** Learning is split between a teacher-led classroom session (using **GrapeSEED Nexus**) and daily home practice (using the **GrapeSEED Student App / REP**). Your backend serves both contexts simultaneously.
+
+### The GrapeSEED Technology Ecosystem
+
+GrapeSEED is not a single app — it is an ecosystem of interconnected products:
+
+| Product | Who Uses It | What It Does |
+|---------|------------|--------------|
+| **GrapeSEED Student App (REP)** | Students (ages 4–12) | Daily repeated exposure practice at home. Playlists of songs, stories, chants. iOS, Android, browser. |
+| **GrapeSEED Nexus** | Teachers | In-classroom tablet app. Presents lessons on smartboards, manages attendance, assigns active-learn content to student playlists. |
+| **GrapeSEED Connect** | Teachers + Students | Web/app video conferencing for remote/hybrid classes. Integrated curriculum materials, virtual stickers, live annotation. |
+| **GrapeSEED School Portal** | School administrators | Manage campus structure, configure licenses, monitor class and student progress, order materials. |
+| **Parent Portal** | Parents | Track their child's daily REP completion and progress. |
+
+As a backend engineer, your job is to power **all of these products** through a shared set of APIs and services.
+
+### The Business Model — B2B School Licensing
+
+GrapeSEED is a **B2B company**. It does not sell directly to parents or students. Instead, it partners with schools and language centers, which then deliver GrapeSEED to enrolled children:
+
+```
+GrapeSEED (HQ) ── licenses curriculum + software ──► Partner School
+                                                           │
+                                                     School deploys
+                                                     to enrolled children
+                                                           │
+                                                    ┌──────┴──────────┐
+                                                 Teachers          Students
+                                                (Nexus app)     (Student App)
+```
+
+Each partner school is a **tenant** in your system. They have:
+- A set of **student licenses** purchased from GrapeSEED (one license = one enrolled student)
+- **Campus and class structures** they manage via the School Portal
+- Their own teachers and administrator accounts
+- Configuration for which GrapeSEED content they have licensed (e.g., Units 1–6 only)
+- Their own delivery model preference: Offline, Online (Connect), or Hybrid (Nexus + Connect)
+
+This B2B licensing model is the core driver for the multi-tenant architecture described in Chapter 2.
 
 ---
 
 ## How to Read This Book
 
-Each chapter is **self-contained**, but they build on each other logically. Read in order if you are new to all topics. Jump to a chapter if you need a specific skill.
+Each chapter is **self-contained** but builds logically on the previous one. Read in order if you are new to all topics.
 
 ### Recommended Reading Path
 
 ```
-Chapter 1: Distributed Systems
+Chapter 1: Distributed Systems       ← Why one server will never be enough
         ↓
-Chapter 2: Multi-Tenant Architecture
+Chapter 2: Multi-Tenant Architecture  ← How to serve many partner schools safely
         ↓
-Chapter 3: High Load Systems
+Chapter 3: High Load Systems          ← How to handle daily traffic spikes
         ↓
-Chapter 4: Microservices & MediatR
+Chapter 4: Microservices & MediatR    ← How to organize the codebase as GrapeSEED scales
 ```
 
-Every chapter follows the same structure:
+Every chapter follows this structure:
 
-1. **The Real-World Problem** — Why does this topic exist? What breaks without it?
+1. **The Real-World Problem** — A specific scenario from GrapeSEED's context
 2. **Core Concepts** — Plain-English explanations with analogies
 3. **The Theory** — Formal models and patterns
 4. **C# in Practice** — Real, commented code using your actual tech stack
-5. **Grapeseed Scenario** — How this applies specifically to your system
+5. **GrapeSEED Scenario** — How this specifically applies to the platform
 6. **Decision Guide** — When to use, when to avoid, common mistakes
 
 ---
 
 ## Tech Stack Reference
 
-Throughout this book, all code examples are grounded in the actual Grapeseed stack:
+All code examples are grounded in the real GrapeSEED stack:
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
-| Cloud Platform | **Amazon Web Services (AWS)** | Hosting, compute, managed services |
-| Primary Database | **PostgreSQL on Amazon RDS** | Core transactional data |
-| Enterprise Database | **SQL Server on Amazon RDS** | Reporting, legacy integrations |
-| ORM | **Entity Framework Core** | Database access layer |
-| Cache | **Amazon ElastiCache for Redis** | Distributed caching, sessions |
-| In-Process Messaging | **MediatR** | CQRS commands/queries within a service |
-| Async Messaging | **Amazon SQS / SNS** | Cross-service event delivery |
-| CDN | **Amazon CloudFront** | Global content delivery |
+| Cloud Platform | **Amazon Web Services (AWS)** | Hosting, managed compute, storage |
+| Primary Database | **PostgreSQL on Amazon RDS** | Core transactional data (students, progress, licenses) |
+| Reporting Database | **SQL Server on Amazon RDS** | Complex T-SQL reporting, school management analytics |
+| ORM | **Entity Framework Core** | Database access across both database providers |
+| Cache | **Amazon ElastiCache for Redis** | Distributed cache: content, sessions, school config |
+| In-Process Messaging | **MediatR** | CQRS — commands/queries/notifications within a service |
+| Async Messaging | **Amazon SQS / SNS** | Cross-service events (progress sync, notifications) |
+| CDN | **Amazon CloudFront** | Lesson audio/video delivery to students globally |
+| Media Storage | **Amazon S3** | Lesson songs, stories, video files, certificates |
 | Container Orchestration | **Amazon ECS Fargate** | Stateless service deployment |
-| API Gateway | **AWS API Gateway / ALB** | Single entry point, routing, auth |
+| API Gateway | **AWS API Gateway / ALB** | Single entry point, routing, JWT auth |
 | Observability | **AWS CloudWatch + X-Ray** | Logs, metrics, distributed tracing |
-| Secrets | **AWS Secrets Manager** | Connection strings, API keys |
-| File Storage | **Amazon S3** | Video files, images, PDFs |
+| Secrets | **AWS Secrets Manager** | DB connection strings, API keys |
 
 ---
 
@@ -76,102 +121,105 @@ Throughout this book, all code examples are grounded in the actual Grapeseed sta
 
 *"How do you build a system that keeps working even when parts of it — or parts of AWS — fail?"*
 
-The foundation of everything else. You will learn why a single server is never enough, the surprising problems that come with spreading work across machines, and how to design for failure. Topics: the 8 Fallacies of Distributed Computing, the CAP Theorem, consistency models, circuit breakers with Polly, and distributed caching with Amazon ElastiCache.
+The 8 Fallacies of Distributed Computing, the CAP Theorem, consistency models, circuit breakers with Polly, and distributed caching with Amazon ElastiCache.
 
-**Grapeseed Angle:** How lesson content is served reliably to students in Thailand, Brazil, and South Korea — simultaneously — using AWS infrastructure.
+**GrapeSEED Angle:** How lesson audio and video content is served reliably to students in Vietnam and South Korea while they practice daily English exercises using the Student App (REP) — including offline sync scenarios.
 
 ---
 
 ### 🏫 [Chapter 2 — Multi-Tenant Architecture](./book_ch2_multi_tenant_systems.md)
 
-*"How do you build one system that serves hundreds of different schools, each believing they have their own private platform?"*
+*"How do you serve hundreds of partner schools — each with their own students, licenses, and curriculum — from one shared platform?"*
 
-Multi-tenancy is the art of serving many customers from one codebase while keeping their data completely isolated. This chapter covers the three tenancy models, EF Core global query filters for automatic data isolation, Row-Level Security in PostgreSQL and SQL Server, MediatR pipeline behaviors for tenant injection, and AWS-specific tenant storage strategies.
+The three tenancy models, EF Core global query filters, Row-Level Security in PostgreSQL and SQL Server, and MediatR pipeline behaviors for tenant context injection.
 
-**Grapeseed Angle:** School A in Bangkok and School B in São Paulo both use the same platform, but they can never see each other's students, teachers, or lesson content.
+**GrapeSEED Angle:** A school in Hanoi and a school in Seoul both use GrapeSEED. They must never see each other's student data, progress records, or license information — enforced architecturally, not by convention.
 
 ---
 
 ### ⚡ [Chapter 3 — High Load Systems](./book_ch3_high_load_systems.md)
 
-*"How do you keep Grapeseed fast when thousands of students and teachers log in at the same moment?"*
+*"How do you keep GrapeSEED fast when thousands of children simultaneously open their daily lesson playlist?"*
 
-This chapter teaches horizontal scaling on ECS Fargate, load balancing with AWS Application Load Balancer, multi-layer caching with CloudFront and ElastiCache, RDS read replicas, async processing with SQS, rate limiting, and background jobs. AWS Auto Scaling ensures you have exactly the capacity you need — no more, no less.
+CloudFront for global audio/video delivery, ElastiCache caching, ECS Auto Scaling, RDS read replicas, SQS async processing, rate limiting, and Hangfire background jobs.
 
-**Grapeseed Angle:** National English examinations day. Traffic spikes 20x in 60 seconds. The platform absorbs it without manual intervention.
+**GrapeSEED Angle:** Back-to-school season. Hundreds of partner schools in multiple time zones go live simultaneously. The Student App (REP) must serve daily playlists to tens of thousands of concurrent children with sub-second load times.
 
 ---
 
 ### 🧩 [Chapter 4 — Microservices & MediatR](./book_ch4_microservices.md)
 
-*"How do teams build, deploy, and scale different parts of Grapeseed independently — and how does MediatR keep each service's code clean and organized?"*
+*"How do teams independently build, deploy, and scale GrapeSEED's School Portal, Student App, Nexus, and Connect — while MediatR keeps each service's code clean?"*
 
-This chapter covers Domain-Driven Design and bounded contexts for Grapeseed's services, **MediatR CQRS pattern** (commands, queries, notifications, pipeline behaviors), AWS API Gateway routing, Amazon SQS/SNS for cross-service events, the Saga pattern for distributed transactions, and distributed tracing with AWS X-Ray.
+Full MediatR CQRS pattern (commands, queries, notifications, pipeline behaviors), GrapeSEED's service decomposition, AWS API Gateway, SQS/SNS event bus, Saga pattern for student enrollment, and AWS X-Ray tracing.
 
-**Grapeseed Angle:** The LessonService, VideoService, ProgressService, NotificationService — each independently deployable on ECS Fargate, each internally organized with MediatR.
+**GrapeSEED Angle:** The Student App team, the School Portal team, and the Nexus team all deploy independently. MediatR ensures every handler inside each service is clean, testable, and consistent.
 
 ---
 
-## The Grapeseed System We Are Building
+## The GrapeSEED Platform We Are Building
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Grapeseed English Education Program               │
-│                        (AWS Infrastructure)                          │
-│                                                                       │
-│  ┌──────────┐   ┌──────────┐   ┌─────────────────────────────┐     │
-│  │ Schools  │   │ Teachers │   │  Students (Lesson+Video+Quiz)│     │
-│  │(Tenants) │   │  Portal  │   └─────────────────────────────┘     │
-│  └──────────┘   └──────────┘                                        │
-│        │              │                   │                          │
-│  ┌─────▼──────────────▼───────────────────▼──────────────────────┐  │
-│  │          Amazon CloudFront (CDN + DDoS Protection)             │  │
-│  └─────────────────────────┬──────────────────────────────────────┘  │
-│                             │                                         │
-│  ┌──────────────────────────▼──────────────────────────────────────┐ │
-│  │       AWS API Gateway / Application Load Balancer               │ │
-│  │       (Auth, Routing, Rate Limiting, SSL Termination)           │ │
-│  └──────┬───────────┬──────────────┬───────────────┬──────────────┘ │
-│         │           │              │               │                 │
-│  ┌──────▼──┐  ┌─────▼──┐  ┌───────▼──┐  ┌────────▼──┐             │
-│  │Identity │  │Lesson  │  │  Video   │  │ Progress  │             │
-│  │Service  │  │Service │  │ Service  │  │ Service   │             │
-│  │(ECS)    │  │(ECS)   │  │  (ECS)   │  │  (ECS)    │             │
-│  └────┬────┘  └───┬────┘  └────┬─────┘  └─────┬─────┘             │
-│       │           │             │               │                   │
-│  ┌────▼──┐  ┌─────▼──┐  ┌──────▼───┐  ┌────────▼──┐               │
-│  │RDS PG │  │RDS PG  │  │  S3 +    │  │ RDS PG    │               │
-│  │       │  │        │  │CloudFront│  │           │               │
-│  └───────┘  └────────┘  └──────────┘  └───────────┘               │
-│                                                                       │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │  Amazon SQS / SNS  (Async Event Messaging Between Services)    │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-│                                                                       │
-│  ┌──────────────────┐   ┌───────────────────────────────────────┐   │
-│  │ ElastiCache Redis│   │ RDS SQL Server (Reporting / Analytics) │   │
-│  └──────────────────┘   └───────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│              GrapeSEED Technology Ecosystem (AWS Infrastructure)          │
+│                                                                            │
+│  ┌─────────────────┐ ┌───────────────┐ ┌──────────────┐ ┌────────────┐  │
+│  │  Student App    │ │ Nexus Teacher │ │   Connect    │ │  School    │  │
+│  │  (REP)          │ │  (iOS/Android)│ │  (Video Call)│ │  Portal    │  │
+│  │  iOS/Android/   │ │   Classroom   │ │   Remote     │ │  Web Admin │  │
+│  │  Browser        │ │   Management  │ │   Classes    │ │  Dashboard │  │
+│  └────────┬────────┘ └──────┬────────┘ └──────┬───────┘ └─────┬──────┘  │
+│           │                 │                 │               │           │
+│  ┌────────▼─────────────────▼─────────────────▼───────────────▼────────┐ │
+│  │              Amazon CloudFront (CDN + WAF + DDoS Protection)         │ │
+│  └─────────────────────────────────────┬────────────────────────────────┘ │
+│                                         │                                  │
+│  ┌──────────────────────────────────────▼────────────────────────────────┐│
+│  │            AWS API Gateway / Application Load Balancer                ││
+│  │       JWT Auth · Routing · Rate Limiting · SSL Termination            ││
+│  └───────┬─────────────┬──────────────────┬──────────────────┬───────────┘│
+│          │             │                  │                  │             │
+│  ┌───────▼───┐ ┌───────▼────┐ ┌──────────▼──┐ ┌────────────▼──┐          │
+│  │Identity   │ │Content     │ │  Progress   │ │  School       │          │
+│  │Service    │ │Service     │ │  Service    │ │  Portal Svc   │          │
+│  │(ECS)      │ │(ECS)       │ │  (ECS)      │ │  (ECS)        │          │
+│  │           │ │            │ │             │ │               │          │
+│  │Students,  │ │Units,      │ │REP progress,│ │Tenants,       │          │
+│  │teachers,  │ │lessons,    │ │Scores,      │ │licenses,      │          │
+│  │auth, JWT  │ │playlists,  │ │certificates │ │school config  │          │
+│  │           │ │media refs  │ │             │ │               │          │
+│  └─────┬─────┘ └──────┬─────┘ └──────┬──────┘ └───────┬───────┘          │
+│        │              │              │                 │                   │
+│  ┌─────▼──┐    ┌───────▼──┐  ┌───────▼───┐   ┌────────▼───┐              │
+│  │RDS PG  │    │RDS PG    │  │ RDS PG    │   │RDS PG      │              │
+│  │        │    │(+ S3 for │  │           │   │            │              │
+│  │        │    │ media)   │  │           │   │            │              │
+│  └────────┘    └──────────┘  └───────────┘   └────────────┘              │
+│                                                                            │
+│  ┌──────────────┐  ┌───────────────────────────────────────────────────┐  │
+│  │ ElastiCache  │  │  Notification + Analytics Services                │  │
+│  │ (Redis)      │  │  NotifySvc: SQS + SES/SNS (email/push to parents) │  │
+│  │              │  │  AnalyticsSvc: RDS SQL Server + QuickSight        │  │
+│  └──────────────┘  └───────────────────────────────────────────────────┘  │
+│                                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │    Amazon SQS / SNS  (Cross-Service Events: progress, enrollments)  │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Why Both PostgreSQL and SQL Server?
 
-A common question when looking at the Grapeseed stack: *"Why do we have two databases?"*
+Most services use **PostgreSQL on RDS** — it's open-source, cost-effective, supports Row-Level Security for multi-tenancy, and has excellent EF Core support.
 
-**PostgreSQL on RDS** is used for the core microservices (Identity, Lesson, Progress, etc.):
-- Open source, no per-core licensing cost
-- Excellent support for JSON columns (flexible lesson content structures)
-- Row-Level Security for multi-tenancy
-- Great EF Core support, performant at scale
+**SQL Server on RDS** is used specifically for the **Analytics Service**, which powers the School Portal's management dashboards and GrapeSEED's internal business reporting:
+- School administrators expect familiar tabular reports (enrollment numbers, license usage, completion rates by class)
+- The analytics team uses complex T-SQL queries: window functions, CTEs, SSRS-style aggregations
+- GrapeSEED's internal business teams use SQL Server tools for ad-hoc analysis
 
-**SQL Server on RDS** is used for:
-- **Enterprise reporting** — many school district IT administrators have existing SSRS (SQL Server Reporting Services) integrations and expect SQL Server
-- **Legacy data migration** — some school systems exported data from SQL Server-based LMS systems
-- **Analytics dashboards** — the Grapeseed Analytics Service uses complex T-SQL queries, CTEs, and window functions that the analytics team is most productive with in SQL Server
-
-EF Core abstracts both databases elegantly — you can switch providers with one line in `Program.cs`, and most of your code remains identical.
+EF Core abstracts both databases cleanly — swapping providers is a one-line change in `Program.cs`.
 
 ---
 
@@ -182,7 +230,7 @@ This book assumes you:
 - Have used **Entity Framework Core** at least once
 - Have basic familiarity with **REST APIs**
 - Know what **Docker containers** are
-- Have heard of **MediatR** (even if you haven't used it deeply yet)
+- Have encountered **MediatR** (even just the concept of CQRS)
 
 You do **not** need to be an AWS expert — cloud-specific concepts are explained as they appear.
 
