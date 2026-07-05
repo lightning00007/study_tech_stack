@@ -1,0 +1,203 @@
+name: GrapeSeed CI Pipeline
+
+# =============================================================================
+# 📖 CONCEPT: GitHub Actions CI Pipeline
+# =============================================================================
+# This workflow runs automatically on every push and pull request.
+# A CI (Continuous Integration) pipeline is the automated safety net that
+# catches bugs before they reach production.
+#
+# Our pipeline does the following:
+#   1. Checks out the code.
+#   2. Restores NuGet packages.
+#   3. Builds all projects (catches compilation errors).
+#   4. Runs unit and integration tests.
+#   5. (On main branch) Tags and prepares a release.
+#
+# 📖 CONCEPT: Why CI matters in a microservices system
+# With 4+ services, a change in SharedKernel could break TenantService,
+# IdentityService, VideoService, and RecommendationService simultaneously.
+# The CI pipeline catches these cross-service regressions automatically,
+# within minutes of the code being pushed.
+#
+# 🔗 SEE ALSO: docs/03-microservices.md#37-the-sharedkernel
+# =============================================================================
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'grapeseed/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'grapeseed/**'
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  SOLUTION_DIR: 'grapeseed/src'
+
+jobs:
+
+  # ── Build and Test ────────────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    # 📖 CONCEPT: Service containers
+    # GitHub Actions can spin up Docker containers alongside the job.
+    # These run a real PostgreSQL and Redis for integration tests.
+    # They are accessible at localhost on the specified port.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: grapeseed_test
+          POSTGRES_USER: grapeseed
+          POSTGRES_PASSWORD: ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      # ── Step 1: Checkout ──────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Step 2: Set up .NET ───────────────────────────────────────────────
+      - name: Set up .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # ── Step 3: Cache NuGet packages ─────────────────────────────────────
+      # 📖 CONCEPT: Caching in CI
+      # NuGet restore downloads packages from the internet. Caching the packages
+      # between runs saves 30-60 seconds per run. The cache key includes the
+      # lock file hash — if dependencies change, the cache is invalidated.
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      # ── Step 4: Restore dependencies ─────────────────────────────────────
+      - name: Restore dependencies
+        run: dotnet restore grapeseed/src/GrapeSeed.sln
+
+      # ── Step 5: Build ─────────────────────────────────────────────────────
+      # --no-restore: skip redundant restore (already done in Step 4)
+      # -c Release: build in Release mode (same as production)
+      # --warnaserror: treat warnings as errors (enforces code quality)
+      - name: Build
+        run: |
+          dotnet build grapeseed/src/GrapeSeed.sln \
+            --no-restore \
+            -c Release \
+            --warnaserror
+
+      # ── Step 6: Run tests ─────────────────────────────────────────────────
+      # 📖 CONCEPT: Test layers
+      #   Unit tests: fast, no external dependencies, test business logic
+      #   Integration tests: slower, use real DB + Redis, test the full stack
+      - name: Run unit tests
+        run: |
+          dotnet test grapeseed/src/GrapeSeed.sln \
+            --no-build \
+            -c Release \
+            --filter "Category=Unit" \
+            --logger "trx;LogFileName=unit-test-results.trx" \
+            --results-directory ./test-results
+
+      - name: Run integration tests
+        env:
+          ConnectionStrings__Postgres: "Host=localhost;Port=5432;Database=grapeseed_test;Username=grapeseed;Password=ci_password"
+          ConnectionStrings__Redis: "localhost:6379"
+        run: |
+          dotnet test grapeseed/src/GrapeSeed.sln \
+            --no-build \
+            -c Release \
+            --filter "Category=Integration" \
+            --logger "trx;LogFileName=integration-test-results.trx" \
+            --results-directory ./test-results
+
+      # ── Step 7: Publish test results ──────────────────────────────────────
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: always()   # Run even if tests fail, so we can see the results
+        with:
+          name: Test Results
+          path: test-results/*.trx
+          reporter: dotnet-trx
+
+      # ── Step 8: Code coverage report ─────────────────────────────────────
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        if: success()
+        with:
+          files: test-results/coverage.cobertura.xml
+          flags: grapeseed
+
+  # ── Static Analysis ───────────────────────────────────────────────────────────
+  # 📖 CONCEPT: Static analysis catches issues without running the code.
+  # We run it in a separate job so it doesn't block the main build/test job.
+  code-analysis:
+    name: Code Analysis
+    runs-on: ubuntu-latest
+    needs: build-and-test    # Only run if build passes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # 📖 CONCEPT: dotnet format checks that code style matches .editorconfig rules.
+      # In a team environment, consistent formatting prevents noisy diffs where
+      # one developer's IDE reformats the whole file while fixing one line.
+      - name: Check code formatting
+        run: dotnet format grapeseed/src/GrapeSeed.sln --verify-no-changes --severity warn
+
+  # ── Security Scanning ─────────────────────────────────────────────────────────
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # 📖 CONCEPT: dotnet list package --vulnerable checks all NuGet packages
+      # against the GitHub Advisory Database for known security vulnerabilities.
+      # In a distributed system, a vulnerable transitive dependency in SharedKernel
+      # affects every service. Catching it early is critical.
+      - name: Check for vulnerable packages
+        run: |
+          dotnet list grapeseed/src/GrapeSeed.sln package --vulnerable --include-transitive 2>&1 | tee /tmp/vuln-output.txt
+          if grep -q "Critical\|High" /tmp/vuln-output.txt; then
+            echo "::error::Critical or High severity vulnerabilities found!"
+            exit 1
+          fi

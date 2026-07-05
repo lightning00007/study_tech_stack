@@ -1,0 +1,140 @@
+{
+  // =============================================================================
+  // 📖 CONCEPT: Ocelot API Gateway Configuration
+  // =============================================================================
+  // Ocelot is a .NET API Gateway library. This JSON file defines all routing
+  // rules. Each "Route" maps an upstream path (what the client calls) to a
+  // downstream path (what the internal service exposes).
+  //
+  // Request flow:
+  //   Client → API Gateway → Internal Service
+  //
+  // The gateway handles:
+  //   1. JWT validation (AuthenticationOptions)
+  //   2. Rate limiting (RateLimitOptions)
+  //   3. Load balancing (LoadBalancerOptions — round-robin across instances)
+  //   4. Header transformation (AddHeadersToRequest — inject X-Tenant-Id)
+  //
+  // In Kubernetes: DownstreamHostAndPorts reference Kubernetes Service names.
+  // In Docker Compose: reference container names on the shared network.
+  // =============================================================================
+  "Routes": [
+    // ── Tenant Service Routes ───────────────────────────────────────────────────
+    {
+      // 📖 CONCEPT: {everything} is an Ocelot catch-all route parameter.
+      // It captures any path after /api/tenants/ and forwards it downstream.
+      "UpstreamPathTemplate": "/api/tenants/{everything}",
+      "UpstreamHttpMethod": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+
+      "DownstreamScheme": "http",
+      "DownstreamPathTemplate": "/api/{everything}",
+      "DownstreamHostAndPorts": [
+        { "Host": "tenant-service", "Port": 8080 }
+      ],
+
+      // 📖 CONCEPT: Authentication — the gateway validates the JWT before forwarding.
+      // If the JWT is missing or invalid, the request is rejected with 401.
+      // Downstream services trust that any request they receive has a valid JWT.
+      "AuthenticationOptions": {
+        "AuthenticationProviderKey": "Bearer",
+        // Public endpoints are excluded from auth (no JWT required)
+        "AllowedScopes": []
+      },
+
+      // 📖 CONCEPT: Rate Limiting
+      // Prevents any single client from overwhelming the tenant service.
+      // 100 requests per minute per client IP is a reasonable starting point.
+      "RateLimitOptions": {
+        "ClientWhitelist": [],
+        "EnableRateLimiting": true,
+        "Period": "1m",
+        "PeriodTimespan": 60,
+        "Limit": 100
+      },
+
+      "RouteClaimsRequirement": {},
+
+      // 📖 CONCEPT: Add headers for downstream services
+      // Extract the tenant_id and tenant_schema from the validated JWT claims
+      // and inject them as headers. Downstream services read these headers
+      // to set up their ITenantContext.
+      "AddHeadersToRequest": {
+        "X-Tenant-Id": "Claims[tenant_id] > value",
+        "X-Tenant-Schema": "Claims[tenant_schema] > value",
+        "X-Student-Id": "Claims[sub] > value"
+      }
+    },
+
+    // ── Identity Service Routes ─────────────────────────────────────────────────
+    {
+      "UpstreamPathTemplate": "/api/auth/{everything}",
+      "UpstreamHttpMethod": ["GET", "POST"],
+      "DownstreamScheme": "http",
+      "DownstreamPathTemplate": "/api/{everything}",
+      "DownstreamHostAndPorts": [
+        { "Host": "identity-service", "Port": 8080 }
+      ],
+      // 💡 WHY no auth on login/register: these endpoints create or validate credentials.
+      // The JWT doesn't exist yet when the student calls /api/auth/login.
+      "AuthenticationOptions": {
+        "AuthenticationProviderKey": ""
+      }
+    },
+
+    // ── Video Service Routes ────────────────────────────────────────────────────
+    {
+      "UpstreamPathTemplate": "/api/videos/{everything}",
+      "UpstreamHttpMethod": ["GET", "POST", "DELETE"],
+      "DownstreamScheme": "http",
+      "DownstreamPathTemplate": "/api/{everything}",
+      "DownstreamHostAndPorts": [
+        { "Host": "video-service", "Port": 8080 }
+      ],
+      "AuthenticationOptions": {
+        "AuthenticationProviderKey": "Bearer"
+      },
+      "AddHeadersToRequest": {
+        "X-Tenant-Id": "Claims[tenant_id] > value",
+        "X-Tenant-Schema": "Claims[tenant_schema] > value",
+        "X-Student-Id": "Claims[sub] > value"
+      },
+      // 📖 CONCEPT: Load Balancer
+      // When VideoService scales to multiple instances, Ocelot distributes requests
+      // across all registered downstream hosts in round-robin order.
+      "LoadBalancerOptions": {
+        "Type": "RoundRobin"
+      }
+    },
+
+    // ── Recommendation Service Routes ───────────────────────────────────────────
+    {
+      "UpstreamPathTemplate": "/api/recommendations/{everything}",
+      "UpstreamHttpMethod": ["GET"],
+      "DownstreamScheme": "http",
+      "DownstreamPathTemplate": "/api/{everything}",
+      "DownstreamHostAndPorts": [
+        { "Host": "recommendation-service", "Port": 8080 }
+      ],
+      "AuthenticationOptions": {
+        "AuthenticationProviderKey": "Bearer"
+      },
+      "AddHeadersToRequest": {
+        "X-Tenant-Id": "Claims[tenant_id] > value",
+        "X-Student-Id": "Claims[sub] > value"
+      }
+    }
+  ],
+
+  "GlobalConfiguration": {
+    "BaseUrl": "https://api.grapeseed.io",
+
+    // 📖 CONCEPT: Global rate limit configuration
+    // These settings apply to ALL routes unless overridden per-route.
+    "RateLimitOptions": {
+      "DisableRateLimitHeaders": false,
+      "QuotaExceededMessage": "Rate limit exceeded. Please slow down.",
+      "HttpStatusCode": 429,
+      "ClientIdHeader": "X-Client-Id"
+    }
+  }
+}

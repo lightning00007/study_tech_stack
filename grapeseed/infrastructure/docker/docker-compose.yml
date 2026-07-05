@@ -1,0 +1,135 @@
+services:
+
+  # =============================================================================
+  # 📖 CONCEPT: Docker Compose for Local Development
+  # =============================================================================
+  # This file spins up the full GrapeSeed infrastructure locally.
+  # Instead of real AWS services, we use:
+  #   - LocalStack: an AWS emulator that runs SQS, SNS, S3, and CloudWatch locally
+  #   - PostgreSQL: the real database (no emulator needed)
+  #   - Redis: the real Redis server (no emulator needed)
+  #
+  # Starting the local stack:
+  #   docker compose up -d
+  #
+  # Stopping:
+  #   docker compose down
+  #
+  # Viewing logs:
+  #   docker compose logs -f postgres
+  # =============================================================================
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  # 📖 CONCEPT: PostgreSQL configuration
+  # We use the official postgres image. The POSTGRES_DB creates a default database.
+  # Each service connects to this same PostgreSQL instance using different schemas.
+  postgres:
+    image: postgres:16-alpine
+    container_name: grapeseed-postgres
+    environment:
+      POSTGRES_DB: grapeseed
+      POSTGRES_USER: grapeseed
+      POSTGRES_PASSWORD: localdev_password_not_for_production
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persist data between docker compose down/up cycles
+      - postgres_data:/var/lib/postgresql/data
+      # 📖 CONCEPT: Init scripts
+      # PostgreSQL runs any .sql files in this directory on first startup.
+      # We use it to create the shared schema and any needed extensions.
+      - ./init-scripts/postgres:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U grapeseed -d grapeseed"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  # 📖 CONCEPT: Redis configuration
+  # maxmemory-policy allkeys-lru: when Redis runs out of memory, it evicts
+  # the least-recently-used keys. This is appropriate for a cache — we prefer
+  # evicting old cached data over crashing.
+  redis:
+    image: redis:7-alpine
+    container_name: grapeseed-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --loglevel notice
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── LocalStack (AWS Emulator) ─────────────────────────────────────────────────
+  # 📖 CONCEPT: LocalStack
+  # LocalStack is a cloud service emulator that runs locally.
+  # It implements the AWS API for SQS, SNS, S3, CloudWatch, Lambda, and more.
+  # Your application code doesn't need to change — just point it at localhost:4566.
+  #
+  # After starting LocalStack, run the setup script to create queues and topics:
+  #   ./infrastructure/localstack-setup.sh
+  localstack:
+    image: localstack/localstack:3.0
+    container_name: grapeseed-localstack
+    ports:
+      - "4566:4566"         # Main endpoint (all services)
+      - "4510-4559:4510-4559"
+    environment:
+      SERVICES: s3,sqs,sns,cloudwatch,lambda
+      DEFAULT_REGION: us-east-1
+      HOSTNAME_EXTERNAL: localstack
+      # 💡 WHY PERSISTENCE: keeps created queues/topics after container restart
+      PERSISTENCE: 1
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock  # Needed for Lambda execution
+
+  # ── PgAdmin (optional — database management GUI) ─────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: grapeseed-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@grapeseed.local
+      PGADMIN_DEFAULT_PASSWORD: localdev
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      # 📖 CONCEPT: Docker Compose profiles
+      # This service only starts when you explicitly include the 'tools' profile:
+      #   docker compose --profile tools up -d
+      # This prevents pgAdmin from starting in CI environments.
+      - tools
+
+  # ── Redis Commander (optional — Redis management GUI) ────────────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: grapeseed-redis-commander
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles:
+      - tools
+
+volumes:
+  postgres_data:
+  redis_data:
+  localstack_data:
+
+networks:
+  default:
+    name: grapeseed-local

@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+# =============================================================================
+# 📖 CONCEPT: AWS SAM (Serverless Application Model)
+# =============================================================================
+# SAM is a framework for building serverless applications on AWS. It extends
+# CloudFormation with serverless-specific resource types like AWS::Serverless::Function.
+#
+# SAM handles:
+#   - Packaging: zips the Lambda code and uploads to S3
+#   - Deploying: creates/updates CloudFormation stacks
+#   - Local testing: 'sam local invoke' runs the Lambda function locally
+#
+# To deploy:
+#   sam build && sam deploy --guided
+#
+# 🔗 SEE ALSO: VideoProcessingLambda.cs — the function code
+# =============================================================================
+
+Description: GrapeSeed Lambda functions for video processing pipeline
+
+Globals:
+  Function:
+    Runtime: dotnet8
+    Architectures: [x86_64]
+    MemorySize: 512
+    Timeout: 30                 # 30 seconds max per invocation (we just submit a job)
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+    Default: dev
+
+  VideoBucketName:
+    Type: String
+    Description: Name of the S3 bucket containing raw and processed videos
+
+  MediaConvertRoleArn:
+    Type: String
+    Description: ARN of the IAM role MediaConvert uses to read/write S3
+
+  VideoUploadedTopicArn:
+    Type: String
+    Description: SNS topic ARN for VideoUploadedEvent
+
+Resources:
+
+  # =============================================================================
+  # 📖 CONCEPT: IAM Role for Lambda
+  # =============================================================================
+  # Lambda functions run with an IAM execution role. This role grants the function
+  # permission to call AWS services. We follow the principle of least privilege:
+  # grant ONLY the permissions the function actually needs, nothing more.
+  # =============================================================================
+  VideoProcessingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Basic Lambda execution: write logs to CloudWatch
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VideoProcessingPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read the uploaded video from S3 (to pass the S3 URI to MediaConvert)
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectMetadata]
+                Resource: !Sub 'arn:aws:s3:::${VideoBucketName}/raw/*'
+
+              # Submit MediaConvert jobs
+              - Effect: Allow
+                Action: mediaconvert:CreateJob
+                Resource: '*'
+
+              # Publish events to SNS
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref VideoUploadedTopicArn
+
+              # 💡 WHY passRole: MediaConvert needs to assume a role to write to S3.
+              # Lambda must have iam:PassRole to give MediaConvert that role.
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Ref MediaConvertRoleArn
+
+  # =============================================================================
+  # The Lambda function itself
+  # =============================================================================
+  VideoProcessingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'grapeseed-video-processing-${Environment}'
+      Description: Triggered by S3 uploads to submit MediaConvert transcoding jobs
+      CodeUri: ./VideoProcessingLambda/
+      Handler: GrapeSeed.Lambda.VideoProcessing::GrapeSeed.Lambda.VideoProcessing.VideoProcessingFunction::FunctionHandler
+      Role: !GetAtt VideoProcessingLambdaRole.Arn
+      Environment:
+        Variables:
+          VIDEO_BUCKET_NAME: !Ref VideoBucketName
+          MEDIACONVERT_ROLE_ARN: !Ref MediaConvertRoleArn
+          VIDEO_UPLOADED_TOPIC_ARN: !Ref VideoUploadedTopicArn
+
+      # 📖 CONCEPT: S3 Event Trigger
+      # This tells SAM to configure S3 to invoke this Lambda whenever an object
+      # is created (uploaded) under the 'raw/' prefix. The event is delivered
+      # directly to Lambda (not via SQS). For production, consider using an
+      # SQS queue as a buffer for retry and dead-letter handling.
+      Events:
+        RawVideoUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref VideoBucketName
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: raw/           # Only trigger for files under 'raw/'
+
+      # 📖 CONCEPT: Reserved Concurrency
+      # Limits this Lambda to max 10 concurrent executions. This prevents a
+      # flood of simultaneous uploads from exhausting our MediaConvert quota.
+      ReservedConcurrentExecutions: 10
+
+  # =============================================================================
+  # 📖 CONCEPT: CloudWatch Log Group
+  # =============================================================================
+  # By default, Lambda creates a log group with a long retention period.
+  # We explicitly create it with a 30-day retention to control costs.
+  # CloudWatch Logs pricing is based on data ingested and stored.
+  # =============================================================================
+  VideoProcessingLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/grapeseed-video-processing-${Environment}'
+      RetentionInDays: 30
+
+  # ── CloudWatch Alarm: Lambda errors ─────────────────────────────────────────
+  VideoProcessingErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'grapeseed-video-processing-errors-${Environment}'
+      AlarmDescription: 'Alert when video processing Lambda has errors'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref VideoProcessingFunction
+      Statistic: Sum
+      Period: 300             # 5-minute window
+      EvaluationPeriods: 1
+      Threshold: 1            # Any error triggers the alarm
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  VideoProcessingFunctionArn:
+    Description: ARN of the VideoProcessing Lambda function
+    Value: !GetAtt VideoProcessingFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-VideoProcessingFunctionArn'

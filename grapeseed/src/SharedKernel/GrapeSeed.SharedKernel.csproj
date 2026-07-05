@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      📖 CONCEPT: Class Library project
+      SharedKernel is not a runnable application — it's a library that other projects reference.
+      This keeps shared primitives separate from any specific service, avoiding circular dependencies.
+    -->
+    <OutputType>Library</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>GrapeSeed.SharedKernel</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      MediatR: The mediator library. SharedKernel only references the abstractions package,
+      not the full MediatR package, to keep the dependency footprint minimal.
+    -->
+    <PackageReference Include="MediatR" Version="12.2.0" />
+    <!--
+      FluentValidation: Used by ValidationBehavior to validate incoming commands/queries.
+    -->
+    <PackageReference Include="FluentValidation" Version="11.9.0" />
+    <!--
+      StackExchange.Redis: The standard Redis client for .NET.
+    -->
+    <PackageReference Include="StackExchange.Redis" Version="2.7.17" />
+  </ItemGroup>
+
+</Project>
