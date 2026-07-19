@@ -1,0 +1,8 @@
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj3_cqrs\obj\Debug\net8.0\BookLibrary.Cqrs.csproj.AssemblyReference.cache
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj3_cqrs\obj\Debug\net8.0\rpswa.dswa.cache.json
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj3_cqrs\obj\Debug\net8.0\BookLibrary.Cqrs.GeneratedMSBuildEditorConfig.editorconfig
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj3_cqrs\obj\Debug\net8.0\BookLibrary.Cqrs.AssemblyInfoInputs.cache
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj3_cqrs\obj\Debug\net8.0\BookLibrary.Cqrs.AssemblyInfo.cs
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj3_cqrs\obj\Debug\net8.0\BookLibrary.Cqrs.csproj.CoreCompileInputs.cache
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj3_cqrs\obj\Debug\net8.0\BookLibrary.Cqrs.MvcApplicationPartsAssemblyInfo.cs
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj3_cqrs\obj\Debug\net8.0\BookLibrary.Cqrs.MvcApplicationPartsAssemblyInfo.cache
