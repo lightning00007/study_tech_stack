@@ -1,0 +1,8 @@
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj4_cloud\obj\Debug\net8.0\BookLibrary.CloudNative.csproj.AssemblyReference.cache
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj4_cloud\obj\Debug\net8.0\rpswa.dswa.cache.json
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj4_cloud\obj\Debug\net8.0\BookLibrary.CloudNative.GeneratedMSBuildEditorConfig.editorconfig
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj4_cloud\obj\Debug\net8.0\BookLibrary.CloudNative.AssemblyInfoInputs.cache
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj4_cloud\obj\Debug\net8.0\BookLibrary.CloudNative.AssemblyInfo.cs
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj4_cloud\obj\Debug\net8.0\BookLibrary.CloudNative.csproj.CoreCompileInputs.cache
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj4_cloud\obj\Debug\net8.0\BookLibrary.CloudNative.MvcApplicationPartsAssemblyInfo.cs
+D:\MyPrograms\CodeProjects\study_tech_stack\basic_stack\proj4_cloud\obj\Debug\net8.0\BookLibrary.CloudNative.MvcApplicationPartsAssemblyInfo.cache
