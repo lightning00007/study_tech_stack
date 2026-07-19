@@ -1,0 +1,70 @@
+version: '3.8'
+
+# =============================================================================
+# docker-compose.yml — Local development environment for Project 4
+# =============================================================================
+# This file starts three services:
+#   1. PostgreSQL 16  — the application database
+#   2. LocalStack     — AWS emulator (SNS, SQS, S3, etc.)
+#   3. (optional) AWS CLI setup — pre-creates the SNS topic in LocalStack
+#
+# To start:
+#   docker compose up -d
+#
+# To stop:
+#   docker compose down
+#
+# To reset everything (including database data):
+#   docker compose down -v
+# =============================================================================
+
+services:
+
+  # ── PostgreSQL 16 ───────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: booklibrary_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: booklibrary_cloud
+    ports:
+      - "5432:5432"
+    volumes:
+      # Named volume persists data between docker compose down/up (without -v)
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── LocalStack (AWS Emulator) ────────────────────────────────────────────────
+  # 📖 CONCEPT: LocalStack runs a local AWS emulator. The AWS SDK sees it as a
+  # real AWS endpoint (http://localhost:4566). This lets you develop and test
+  # SNS, SQS, S3, Lambda, DynamoDB, etc. without AWS credentials or costs.
+  #
+  # The SERVICES environment variable specifies which AWS services to emulate.
+  # Only start what you need — it saves memory.
+  localstack:
+    image: localstack/localstack:3
+    container_name: booklibrary_localstack
+    environment:
+      - SERVICES=sns,sqs
+      - DEBUG=0
+      - DEFAULT_REGION=us-east-1
+    ports:
+      - "4566:4566"       # The LocalStack gateway port — all services use this
+    volumes:
+      - localstack_data:/var/lib/localstack
+      # Mount the init script to auto-create AWS resources on startup
+      - ./localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  localstack_data:
